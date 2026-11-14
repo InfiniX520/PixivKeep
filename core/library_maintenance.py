@@ -59,6 +59,8 @@ from core.library_repository import (
     _validate_database_path,
 )
 from core.task_contracts import ContractError
+from core.workspace_ownership import TemporaryWorkspace, WorkspaceError
+from core.workspace_ownership import describe as _describe_cleanup
 
 MANIFEST_VERSION = 2
 SUPPORTED_MANIFEST_VERSIONS = (1, 2)
@@ -494,14 +496,41 @@ def _copy_file(source: Path, destination: Path) -> dict[str, object]:
     return {"name": destination.name, "bytes": total, "sha256": digest.hexdigest()}
 
 
-def _discard(directory: Path) -> None:
-    """Remove only what this run created; never follow a link out of it."""
-    for entry in os.scandir(directory):
-        if entry.is_dir(follow_symlinks=False):
-            _discard(Path(entry.path))
-        else:
-            os.unlink(entry.path)
-    os.rmdir(directory)
+def _discard(workspace: TemporaryWorkspace) -> dict[str, object]:
+    """Remove what this operation created and still owns; never anything else.
+
+    The old body of this function walked the directory and deleted whatever it
+    found.  A verifier does not own whatever happens to sit next to its copy, and
+    on Windows a junction is listed as a directory, so that walk could delete
+    files in another directory.  Ownership now lives in the workspace record;
+    this name stays as the one place a caller (and a test) can replace the
+    cleanup step.
+    """
+    return workspace.discard()
+
+
+def _record_sidecars(workspace: TemporaryWorkspace, name: str) -> None:
+    """SQLite may create -wal/-shm beside a database this run just opened.
+
+    They belong to the copy this run made, so they are recorded here by exact
+    name.  Nothing is inferred from a suffix that happens to be on disk.
+    """
+    for suffix in ("-wal", "-shm"):
+        workspace.record(name + suffix, required=False)
+
+
+def _safe_cleanup(workspace: TemporaryWorkspace) -> dict[str, object]:
+    """Cleanup must never replace the failure that made it necessary."""
+    try:
+        return _discard(workspace)
+    except BaseException as error:  # a cleanup failure is data, not a new crash
+        return {
+            "state": "failed",
+            "path": str(workspace.path),
+            "removed": [],
+            "kept": [],
+            "errors": ["cleanup_failed: %s: %s" % (type(error).__name__, error)],
+        }
 
 
 def _backup_name(label: str | None, destination_root: Path) -> Path:
@@ -616,45 +645,103 @@ def _journal_header(path: Path) -> tuple[int, int] | None:
 def restore_check(path: str | Path) -> dict[str, object]:
     """Is this file group one consistent state that may be opened?
 
-    A rollback-journal database with a non-empty -wal beside it is a mixed
-    group: SQLite ignores that log for the current content, so the files on
-    disk no longer describe one state, and the next writer would inherit a log
-    that belongs to another file.  A restore must never leave one behind, so
-    the check reports it instead of guessing which side is right.
+    Four questions are answered separately, because they fail differently:
+
+    content_healthy   the database's own integrity checks pass;
+    openable          this build would open it (status == compatible);
+    group_consistent  the files beside it belong to the same state: a
+                      rollback-journal database with a non-empty -wal is a mixed
+                      group, and SQLite would silently ignore that log;
+    observed          all of the above could actually be read.
+
+    The journal header (bytes 18 and 19) says which mode the file itself is in.
+    It cannot prove where a stray -wal came from, so a group with an unexplained
+    log is refused rather than guessed at.  The WAL is examined before the
+    database, because an unreadable log is a specific fact (wal_unreadable) and
+    not the same thing as a database nobody could open.
     """
     target = _resolve_target(path)
-    report = inspect_library(target)
-    wal = Path(str(target) + "-wal")
-    wal_bytes = 0
+    wal_path = Path(str(target) + "-wal")
+    wal_bytes: int | None = 0
+    wal_readable = True
     try:
-        if wal.is_file():
-            wal_bytes = int(wal.stat().st_size)
+        wal_bytes = int(wal_path.stat().st_size) if wal_path.is_file() else 0
     except OSError:
-        wal_bytes = 0
+        wal_bytes = None
+        wal_readable = False
+    if not wal_readable:
+        # The log beside the database cannot be read, so the group cannot be
+        # judged at all.  This is a specific fact, not 'the database is bad'.
+        return {
+            "path": str(target),
+            "state": "wal_unreadable",
+            "status": "unknown",
+            "journal_mode": None,
+            "wal_mode": None,
+            "header_journal": None,
+            "wal_bytes": None,
+            "reasons": ["wal_unreadable"],
+            "content_healthy": None,
+            "openable": None,
+            "group_consistent": False,
+            "exit_code": 2,
+        }
+    try:
+        report = inspect_library(target)
+    except Exception as error:  # noqa: BLE001 - observation failure is a state
+        return {
+            "path": str(target),
+            "state": "unobservable",
+            "status": "unobservable",
+            "journal_mode": None,
+            "wal_mode": None,
+            "header_journal": None,
+            "wal_bytes": wal_bytes,
+            "reasons": ["inspect_failed"],
+            "content_healthy": None,
+            "openable": None,
+            "group_consistent": None,
+            "exit_code": 3,
+            "detail": "%s: %s" % (type(error).__name__, error),
+        }
     header = _journal_header(target)
     wal_mode = header == (2, 2)
+    status = str(report["status"])
     reasons: list[str] = []
-    if report["status"] == "missing":
+    if not wal_readable:
+        state = "wal_unreadable"
+        reasons.append("wal_unreadable")
+    elif status == "missing":
         state = "library_missing"
         reasons.append("library_missing")
+    elif status in {"unreadable", "empty", "incompatible", "not_a_sqlite_file"}:
+        state = "not_usable"
+        reasons.append("status_" + status)
     elif not wal_mode and wal_bytes:
         state = "orphan_wal"
         reasons.append("orphan_wal")
     else:
         state = "ok"
+    exit_code = 0 if state == "ok" else 2
     return {
         "path": str(target),
         "state": state,
-        "status": report["status"],
+        "status": status,
         "journal_mode": report["journal_mode"],
         "wal_mode": wal_mode,
         "header_journal": list(header) if header is not None else None,
         "wal_bytes": wal_bytes,
         "reasons": reasons,
+        "content_healthy": bool(report.get("healthy")),
+        "openable": status == "compatible",
+        "group_consistent": state == "ok",
+        "exit_code": exit_code,
     }
 
 
-def _online_snapshot(source: Path, target: Path) -> list[dict[str, object]]:
+def _online_snapshot(
+    source: Path, target: Path, workspace: TemporaryWorkspace
+) -> list[dict[str, object]]:
     """Consistent snapshot through the SQLite online backup API.
 
     The source connection is read-only and holds no transaction, so the API
@@ -666,6 +753,8 @@ def _online_snapshot(source: Path, target: Path) -> list[dict[str, object]]:
     destination = sqlite3.connect(
         str(target), timeout=_READ_TIMEOUT_SECONDS, isolation_level=None
     )
+    # The file belongs to this run from the moment SQLite creates it.
+    workspace.record(target.name)
     try:
         with contextlib.closing(_connect_readonly(source, snapshot=False)) as origin:
             origin.backup(destination)
@@ -676,6 +765,8 @@ def _online_snapshot(source: Path, target: Path) -> list[dict[str, object]]:
         destination.execute("PRAGMA journal_mode=DELETE")
     finally:
         destination.close()
+    for suffix in ("-wal", "-shm"):
+        workspace.record(target.name + suffix, required=False)
     leftovers = [
         suffix
         for suffix in ("-wal", "-shm")
@@ -688,7 +779,10 @@ def _online_snapshot(source: Path, target: Path) -> list[dict[str, object]]:
 
 
 def _file_group_copy(
-    source: Path, target: Path, group: dict[str, dict[str, object]]
+    source: Path,
+    target: Path,
+    group: dict[str, dict[str, object]],
+    workspace: TemporaryWorkspace,
 ) -> list[dict[str, object]]:
     """Byte-for-byte copy of the database file set; needs a quiet source."""
     for suffix in ("", "-wal"):
@@ -705,8 +799,8 @@ def _file_group_copy(
         if not entry["present"]:
             continue
         try:
-            files.append(
-                _copy_file(Path(str(source) + suffix), target / (source.name + suffix))
+            fact = _copy_file(
+                Path(str(source) + suffix), target / (source.name + suffix)
             )
         except FileNotFoundError:
             if suffix == "-shm":
@@ -721,6 +815,9 @@ def _file_group_copy(
             # A WAL that held frames, or the database itself, cannot vanish
             # without the source having moved; no copy may vouch for that.
             raise
+        files.append(fact)
+        # The copy just created this name; recording it is what makes it ours.
+        workspace.record(fact["name"])
     return files
 
 
@@ -746,8 +843,11 @@ def backup_library(
     the source is not healthy enough for the online API.
 
     The manifest is written last, so its presence proves the copy verified.
-    Any failure removes the run's own directory; a failed backup never looks
-    like a successful one.
+    From the moment the target directory exists to the moment the manifest is
+    in place, one failure boundary covers every stage.  A failure keeps the
+    primary error and attaches the cleanup result to it; the cleanup only
+    removes members this run recorded and still owns, so a failed backup never
+    looks like a successful one and never deletes somebody else's file.
     """
     if mode not in {"auto", "online_backup", "file_group"}:
         raise BackupError("invalid_mode", mode)
@@ -783,156 +883,167 @@ def backup_library(
         raise BackupError("backup_target_exists", str(target)) from None
     except OSError as error:
         raise BackupError("backup_directory_failed", str(error)) from None
-    copy_path = target / source.name
     try:
+        workspace = TemporaryWorkspace.adopt(target, purpose="backup")
+    except WorkspaceError as error:
+        raise BackupError("backup_directory_failed", str(error)) from None
+    stage = "copy"
+    try:
+        copy_path = target / source.name
         if effective == "online_backup":
-            files = _online_snapshot(source, copy_path)
+            files = _online_snapshot(source, copy_path, workspace)
         else:
-            files = _file_group_copy(source, target, before)
-    except BaseException as error:
-        _discard(target)
-        if isinstance(error, LibraryMaintenanceError):
-            raise
-        if not isinstance(error, Exception):
-            # A real interrupt keeps its own type after the cleanup; turning it
-            # into a BackupError would look like a failed backup to a caller
-            # that is trying to stop.
-            raise
-        raise BackupError(
-            "backup_failed", "%s: %s" % (type(error).__name__, error)
-        ) from None
-    after = _group(source)
-    after_counts = _source_counts(source)
-    copy_report = inspect_library(copy_path)
-    # Compare the two sides with each other, not each side against the shared
-    # declaration: two databases can deviate from it in different ways and
-    # still look identical to a name-set comparison (WC-01).
-    source_definitions = _definitions_or_none(source, source_report["status"])
-    copy_definitions = _definitions_or_none(copy_path, copy_report["status"])
-    objects_match = (
-        source_definitions is not None and source_definitions == copy_definitions
-    )
-    counts_match = (
-        before_counts is not None and copy_report["counts"] == before_counts
-    )
-    main_unchanged = (
-        before[""]["bytes"] == after[""]["bytes"]
-        and before[""]["mtime_ns"] == after[""]["mtime_ns"]
-        and before[""]["sha256"] == after[""]["sha256"]
-    )
-    group_unchanged = _comparable(before) == _comparable(after)
-    warnings: list[str] = []
-    problems: list[str] = []
-    checks_match = (
-        copy_report["quick_check"] == source_report["quick_check"]
-        and copy_report["integrity_check"] == source_report["integrity_check"]
-        and copy_report["foreign_key_violations"]
-        == source_report["foreign_key_violations"]
-    )
-    if copy_report["status"] in {"missing", "empty", "unreadable"}:
-        problems.append("copy_unreadable")
-    if not objects_match:
-        problems.append("copy_objects_mismatch")
-    if not checks_match:
-        # A faithful copy reproduces the source's integrity facts exactly.  A
-        # damaged source therefore still gets a usable backup; what is refused
-        # is a copy whose checks disagree with the source it came from.
-        problems.append("copy_integrity_differs")
-    if not main_unchanged:
-        # Only a concurrent checkpoint by another connection can move the main
-        # file while we read it; the online API has no way to write the source.
-        if effective == "file_group":
+            files = _file_group_copy(source, target, before, workspace)
+        stage = "verify"
+
+        after = _group(source)
+        after_counts = _source_counts(source)
+        copy_report = inspect_library(copy_path)
+        _record_sidecars(workspace, source.name)
+        # Compare the two sides with each other, not each side against the shared
+        # declaration: two databases can deviate from it in different ways and
+        # still look identical to a name-set comparison (WC-01).
+        source_definitions = _definitions_or_none(source, source_report["status"])
+        copy_definitions = _definitions_or_none(copy_path, copy_report["status"])
+        objects_match = (
+            source_definitions is not None and source_definitions == copy_definitions
+        )
+        counts_match = (
+            before_counts is not None and copy_report["counts"] == before_counts
+        )
+        main_unchanged = (
+            before[""]["bytes"] == after[""]["bytes"]
+            and before[""]["mtime_ns"] == after[""]["mtime_ns"]
+            and before[""]["sha256"] == after[""]["sha256"]
+        )
+        group_unchanged = _comparable(before) == _comparable(after)
+        warnings: list[str] = []
+        problems: list[str] = []
+        checks_match = (
+            copy_report["quick_check"] == source_report["quick_check"]
+            and copy_report["integrity_check"] == source_report["integrity_check"]
+            and copy_report["foreign_key_violations"]
+            == source_report["foreign_key_violations"]
+        )
+        if copy_report["status"] in {"missing", "empty", "unreadable"}:
+            problems.append("copy_unreadable")
+        if not objects_match:
+            problems.append("copy_objects_mismatch")
+        if not checks_match:
+            # A faithful copy reproduces the source's integrity facts exactly.  A
+            # damaged source therefore still gets a usable backup; what is refused
+            # is a copy whose checks disagree with the source it came from.
+            problems.append("copy_integrity_differs")
+        if not main_unchanged:
+            # Only a concurrent checkpoint by another connection can move the main
+            # file while we read it; the online API has no way to write the source.
+            if effective == "file_group":
+                problems.append("library_changed_during_copy")
+            else:
+                warnings.append("source_changed_during_backup")
+        if not group_unchanged and effective == "file_group":
             problems.append("library_changed_during_copy")
-        else:
-            warnings.append("source_changed_during_backup")
-    if not group_unchanged and effective == "file_group":
-        problems.append("library_changed_during_copy")
-    if not counts_match:
-        if effective == "file_group":
-            problems.append("counts_mismatch")
-        else:
-            warnings.append("counts_advanced_during_backup")
-    for item in files:
-        # -shm is SQLite bookkeeping rebuilt on the next open; every other
-        # member carries content, so it is sealed byte for byte.
-        item["sealed"] = not str(item["name"]).endswith("-shm")
-    try:
-        fingerprint = logical_fingerprint(copy_path)
-    except LibraryMaintenanceError as error:
-        fingerprint = None
-        problems.append("copy_logical_unreadable")
-        warnings.append(getattr(error, "code", "library_unreadable"))
-    if problems:
-        _discard(target)
-        raise BackupError("backup_verification_failed", ",".join(sorted(set(problems))))
-    manifest: dict[str, object] = {
-        "manifest_version": MANIFEST_VERSION,
-        "status": "ok",
-        "mode": effective,
-        "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(
-            timespec="seconds"
-        ),
-        "label": label,
-        "source": str(source),
-        "library_name": source.name,
-        "source_bytes": int(siblings[""]["bytes"]),
-        "source_wal_bytes": 0
-        if siblings["-wal"] is None
-        else int(siblings["-wal"]["bytes"]),
-        "source_shm_bytes": 0
-        if siblings["-shm"] is None
-        else int(siblings["-shm"]["bytes"]),
-        "source_mtime_ns": int(siblings[""]["mtime_ns"]),
-        "journal_mode_source": source_report["journal_mode"],
-        "journal_mode_copy": copy_report["journal_mode"],
-        "files": files,
-        "members": [
-            {
-                "name": str(item["name"]),
-                "bytes": int(item["bytes"]),
-                "sha256": item["sha256"],
-            }
-            for item in files
-        ],
-        "sealed_members": [
-            str(item["name"]) for item in files if item.get("sealed")
-        ],
-        "logical_fingerprint": fingerprint,
-        "copy_name": source.name,
-        "copy_bytes": sum(int(item["bytes"]) for item in files),
-        "objects_declared": copy_report["objects_declared"],
-        "objects_actual": copy_report["objects_actual"],
-        "missing_objects": copy_report["missing_objects"],
-        "extra_objects": copy_report["extra_objects"],
-        "mismatched_objects": copy_report["mismatched_objects"],
-        "counts": copy_report["counts"],
-        "quick_check": copy_report["quick_check"],
-        "integrity_check": copy_report["integrity_check"],
-        "foreign_key_violations": copy_report["foreign_key_violations"],
-        "healthy": bool(copy_report["healthy"]),
-        "verified": True,
-        "objects_match_source": bool(objects_match),
-        "counts_match_source": bool(counts_match),
-        "source_checks": {
-            "main_unchanged": bool(main_unchanged),
-            "group_unchanged": bool(group_unchanged),
-            "main_sha256_before": before[""]["sha256"],
-            "main_sha256_after": after[""]["sha256"],
-            "wal_bytes_before": before["-wal"]["bytes"],
-            "wal_bytes_after": after["-wal"]["bytes"],
-            "shm_excluded": True,
-        },
-        "reasons": [],
-        "warnings": sorted(set(warnings)),
-        "finalizer": {
-            "format": MANIFEST_NAME,
-            "written_at": _now_utc(),
-            "sealed_by": "backup_library",
-        },
-        "restore_steps": _restore_steps(source, source.name, effective, files),
-    }
-    manifest["manifest_path"] = str(_write_manifest(target, manifest))
-    return manifest
+        if not counts_match:
+            if effective == "file_group":
+                problems.append("counts_mismatch")
+            else:
+                warnings.append("counts_advanced_during_backup")
+        for item in files:
+            # -shm is SQLite bookkeeping rebuilt on the next open; every other
+            # member carries content, so it is sealed byte for byte.
+            item["sealed"] = not str(item["name"]).endswith("-shm")
+        try:
+            fingerprint = logical_fingerprint(copy_path)
+        except LibraryMaintenanceError as error:
+            fingerprint = None
+            problems.append("copy_logical_unreadable")
+            warnings.append(getattr(error, "code", "library_unreadable"))
+        if problems:
+            raise BackupError("backup_verification_failed", ",".join(sorted(set(problems))))
+        manifest: dict[str, object] = {
+            "manifest_version": MANIFEST_VERSION,
+            "status": "ok",
+            "mode": effective,
+            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(
+                timespec="seconds"
+            ),
+            "label": label,
+            "source": str(source),
+            "library_name": source.name,
+            "source_bytes": int(siblings[""]["bytes"]),
+            "source_wal_bytes": 0
+            if siblings["-wal"] is None
+            else int(siblings["-wal"]["bytes"]),
+            "source_shm_bytes": 0
+            if siblings["-shm"] is None
+            else int(siblings["-shm"]["bytes"]),
+            "source_mtime_ns": int(siblings[""]["mtime_ns"]),
+            "journal_mode_source": source_report["journal_mode"],
+            "journal_mode_copy": copy_report["journal_mode"],
+            "files": files,
+            "members": [
+                {
+                    "name": str(item["name"]),
+                    "bytes": int(item["bytes"]),
+                    "sha256": item["sha256"],
+                }
+                for item in files
+            ],
+            "sealed_members": [
+                str(item["name"]) for item in files if item.get("sealed")
+            ],
+            "logical_fingerprint": fingerprint,
+            "copy_name": source.name,
+            "copy_bytes": sum(int(item["bytes"]) for item in files),
+            "objects_declared": copy_report["objects_declared"],
+            "objects_actual": copy_report["objects_actual"],
+            "missing_objects": copy_report["missing_objects"],
+            "extra_objects": copy_report["extra_objects"],
+            "mismatched_objects": copy_report["mismatched_objects"],
+            "counts": copy_report["counts"],
+            "quick_check": copy_report["quick_check"],
+            "integrity_check": copy_report["integrity_check"],
+            "foreign_key_violations": copy_report["foreign_key_violations"],
+            "healthy": bool(copy_report["healthy"]),
+            "verified": True,
+            "objects_match_source": bool(objects_match),
+            "counts_match_source": bool(counts_match),
+            "source_checks": {
+                "main_unchanged": bool(main_unchanged),
+                "group_unchanged": bool(group_unchanged),
+                "main_sha256_before": before[""]["sha256"],
+                "main_sha256_after": after[""]["sha256"],
+                "wal_bytes_before": before["-wal"]["bytes"],
+                "wal_bytes_after": after["-wal"]["bytes"],
+                "shm_excluded": True,
+            },
+            "reasons": [],
+            "warnings": sorted(set(warnings)),
+            "finalizer": {
+                "format": MANIFEST_NAME,
+                "written_at": _now_utc(),
+                "sealed_by": "backup_library",
+            },
+            "restore_steps": _restore_steps(source, source.name, effective, files),
+        }
+        stage = "manifest"
+        manifest["manifest_path"] = str(_write_manifest(target, manifest))
+        return manifest
+    except BaseException as error:
+        # The primary failure is saved first; the cleanup result is attached to
+        # it and can never replace it.  A real interrupt keeps its own type.
+        _record_sidecars(workspace, source.name)
+        cleanup = _safe_cleanup(workspace)
+        summary = _describe_cleanup(cleanup)
+        if not isinstance(error, Exception):
+            raise
+        if isinstance(error, LibraryMaintenanceError):
+            error.detail = ("%s; %s" % (error.detail, summary)).strip("; ")
+            raise error
+        code = "backup_manifest_failed" if stage == "manifest" else "backup_failed"
+        raise BackupError(
+            code, "%s: %s; %s" % (type(error).__name__, error, summary)
+        ) from None
 
 
 def _now_utc() -> str:
@@ -1168,6 +1279,8 @@ def _load_manifest(directory: Path) -> dict[str, object]:
 def _safe_member(directory: Path, name: object) -> Path:
     """Resolve one member name inside the backup directory, or refuse it."""
     if not isinstance(name, str) or not name or len(name) > 200:
+        raise BackupError("manifest_member_invalid", repr(name)[:80])
+    if any(ord(character) < 32 or ord(character) == 127 for character in name):
         raise BackupError("manifest_member_invalid", repr(name)[:80])
     if name in {".", ".."} or "/" in name or "\\" in name:
         raise BackupError("manifest_member_invalid", name)
@@ -1473,6 +1586,7 @@ def _seal_members(
     copy_names: list[str],
     sealed_names: list[str],
     workspace: Path,
+    ws: TemporaryWorkspace,
 ) -> tuple[list[dict[str, object]], str, dict[str, object]]:
     """Copy each member once, then judge exactly the bytes that were read.
 
@@ -1527,6 +1641,8 @@ def _seal_members(
             ) from None
         copy_seconds += time.perf_counter() - started
         copy_bytes += int(copied["bytes"])
+        # The copy just created this name; recording it is what makes it ours.
+        ws.record(name)
         after[name] = copied["path_now"]
         started = time.perf_counter()
         readback = _readback_digest(workspace / name)
@@ -1602,6 +1718,18 @@ def _recheck_members(
         if current != before.get(name):
             moved = True
     return moved, after
+
+
+def _verify_exit_code(ok: bool, reasons: list[str]) -> int:
+    """0 when the four facts passed, 3 when they could not be observed, else 2.
+
+    A staging area that cannot be created is not a finding about the backup:
+    nothing was compared, so the command reports an unreadable condition (3)
+    instead of dressing it up as a content mismatch (2).
+    """
+    if "verify_workspace_unavailable" in set(reasons):
+        return 3
+    return 0 if ok else 2
 
 
 def verify_backup(
@@ -1707,6 +1835,7 @@ def verify_backup(
     try:
         try:
             workspace, where = _verification_workspace(root)
+            ws = TemporaryWorkspace.adopt(workspace, purpose="verify")
         except OSError as error:
             reasons.append("verify_workspace_unavailable")
             warnings.append("verify_workspace_unavailable")
@@ -1717,7 +1846,8 @@ def verify_backup(
             evidence["path"] = str(workspace)
             copy_names = sealed_names or [library_name]
             facts, stability, timings = _seal_members(
-                entries, copy_names, sealed_names, workspace
+                entries, copy_names, sealed_names, workspace,
+                ws,
             )
             evidence["source_state_before"] = timings["before"]
             evidence["source_state_after"] = timings["after"]
@@ -1744,6 +1874,7 @@ def verify_backup(
                     logical_error = str(getattr(error, "code", "library_unreadable"))
                     warnings.append("copy_logical_unreadable")
                 evidence["read_seconds"] = round(time.perf_counter() - read_started, 6)
+                _record_sidecars(ws, library_name)
             else:
                 warnings.append("copy_missing")
             # The last look comes after every read, so a member rewritten at any
@@ -1771,15 +1902,16 @@ def verify_backup(
                 reasons.append("changed_during_check")
     finally:
         if workspace is not None:
-            try:
-                _discard(workspace)
-            except OSError as error:
-                evidence["cleanup"] = "failed"
-                evidence["left_behind"] = str(workspace)
-                warnings.append("verify_cleanup_failed")
-                warnings.append("verify_cleanup_failed:" + type(error).__name__)
-            else:
-                evidence["cleanup"] = "ok"
+            # The cleanup is a fact about this run's own directory, not about
+            # the backup: it is reported next to the verdict and never turns a
+            # sound backup into a broken one.
+            _record_sidecars(ws, library_name)
+            cleanup = _safe_cleanup(ws)
+            evidence["cleanup"] = cleanup
+            if cleanup.get("state") != "ok":
+                warnings.append("verify_cleanup_incomplete")
+                if cleanup.get("state") == "failed":
+                    warnings.append("verify_cleanup_failed")
     if sealed_state == "not_checked":
         reasons.append("sealed_not_checked")
 
@@ -1907,6 +2039,7 @@ def verify_backup(
         "source_equivalent": source_equivalent,
         "evidence": evidence,
         "ok": bool(ok),
+        "exit_code": _verify_exit_code(bool(ok), reasons),
         "reasons": sorted(set(reasons)),
         "warnings": sorted(set(warnings)),
         "checked_at": _now_utc(),
@@ -2259,15 +2392,42 @@ _SCAN_FINDINGS = (
 
 
 def _restore_lines(report: dict[str, object]) -> list[str]:
-    """Say what the file group is, and never suggest deleting the log."""
+    """Say what the file group is, and never suggest deleting the log.
+
+    Four questions, four lines: content health, whether this build would open
+    it, whether the group is one state, and whether it could be observed at
+    all.  They fail in different ways, so they are never merged into one
+    reassuring word.
+    """
+    def fact(value: object) -> str:
+        if value is None:
+            return "未能观察"
+        return "是" if value else "否"
+
+    wal_bytes = report.get("wal_bytes")
     lines = [
         "库: %s" % report["path"],
         "状态: %s" % report["state"],
-        "journal_mode: %s  header: %s"
-        % (report["journal_mode"] or "-", report["header_journal"] or "-"),
-        "WAL: %d 字节%s"
-        % (report["wal_bytes"], "（WAL 模式）" if report["wal_mode"] else ""),
+        "内容健康: %s  当前版本可打开: %s  文件组一致: %s"
+        % (
+            fact(report.get("content_healthy")),
+            fact(report.get("openable")),
+            fact(report.get("group_consistent")),
+        ),
+        "status: %s  journal_mode: %s  header: %s"
+        % (
+            report.get("status") or "-",
+            report.get("journal_mode") or "-",
+            report.get("header_journal") or "-",
+        ),
+        "WAL: %s%s"
+        % (
+            "未能读取" if wal_bytes is None else "%d 字节" % wal_bytes,
+            "（WAL 模式）" if report.get("wal_mode") else "",
+        ),
     ]
+    if report.get("reasons"):
+        lines.append("原因: " + ", ".join(str(item) for item in report["reasons"]))
     if report["state"] == "orphan_wal":
         lines.append(
             "这是混合文件组：回滚日志库旁边留着非空 -wal，SQLite 会忽略它，"
@@ -2275,6 +2435,12 @@ def _restore_lines(report: dict[str, object]) -> list[str]:
         )
     elif report["state"] == "library_missing":
         lines.append("库文件不存在；不要在这里新建空库。")
+    elif report["state"] == "not_usable":
+        lines.append("这个文件不是一份可用的库：损坏、空白或与当前 schema 不兼容。")
+    elif report["state"] == "wal_unreadable":
+        lines.append("主库旁边有 -wal，但读不到它的大小；无法判断文件组是否一致。")
+    elif report["state"] == "unobservable":
+        lines.append("无法观察这个库：%s" % (report.get("detail") or "未知原因"))
     return lines
 
 
@@ -2502,8 +2668,21 @@ def _verify_lines(result: dict[str, object]) -> list[str]:
         )
         if evidence.get("stability") == "changed":
             lines.append("注意: 复制期间备份文件被改动，本次核验不能描述任何一个版本。")
-        if evidence.get("cleanup") == "failed":
-            lines.append("提示: 隔离副本未能删除：%s" % evidence.get("left_behind"))
+        cleanup = evidence.get("cleanup")
+        if isinstance(cleanup, dict):
+            state = str(cleanup.get("state") or "unknown")
+            removed = len(cleanup.get("removed") or [])
+            kept = cleanup.get("kept") or []
+            if state == "ok":
+                lines.append("清理: ok（删除 %d 项）" % removed)
+            else:
+                reasons = ",".join(sorted({str(item.get("reason")) for item in kept}))
+                lines.append(
+                    "清理: 保留 %d 项（%s）；核验结论不受影响，残留位置见 JSON: %s"
+                    % (len(kept), reasons or state, cleanup.get("path"))
+                )
+        elif cleanup:
+            lines.append("清理: %s" % cleanup)
     lines.append("健康: %s" % result["health"]["state"])
     lines.append("兼容: %s" % result["compatible"]["state"])
     lines.append("与当前源: %s" % result["source_equivalent"]["state"])
@@ -2603,7 +2782,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 0 if result["ok"] else 2
             result = verify_backup(arguments.target, source=arguments.source)
             _emit(result, as_json, _verify_lines(result))
-            return 0 if result["ok"] else 2
+            return int(result.get("exit_code", 0 if result["ok"] else 2))
         if arguments.command == "compare":
             result = compare_library(arguments.source, arguments.copy)
             _emit(result, as_json, _compare_lines(result))
@@ -2692,7 +2871,7 @@ def main(argv: list[str] | None = None) -> int:
         if arguments.command == "restore-check":
             report = restore_check(arguments.database)
             _emit(report, as_json, _restore_lines(report))
-            return 0 if report["state"] == "ok" else 2
+            return int(report.get("exit_code", 0 if report["state"] == "ok" else 2))
 
         plan = switch_plan(arguments.database)
         _emit(
@@ -2750,6 +2929,9 @@ def main(argv: list[str] | None = None) -> int:
             "manifest_without_members",
             "manifest_without_library_name",
             "manifest_member_missing",
+            "manifest_member_invalid",
+            "verify_workspace_unavailable",
+            "backup_manifest_failed",
         }:
             return 3
         return _EXIT_REFUSED

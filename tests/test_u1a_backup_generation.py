@@ -100,7 +100,13 @@ def test_a_sealed_backup_is_verified_from_one_isolated_copy(tmp_path):
     assert evidence["scope"] == "isolated_copy"
     assert evidence["workspace"] in {"sibling", "system_temp"}
     assert evidence["stability"] == "stable"
-    assert evidence["cleanup"] == "ok"
+    # AMD2 turns the cleanup into a fact object: state says what happened,
+    # kept names anything left behind.  A verified backup must remove exactly
+    # the copy it made and keep nothing.
+    cleanup = evidence["cleanup"]
+    assert cleanup["state"] == "ok"
+    assert cleanup["kept"] == []
+    assert cleanup["removed"] == ["library.sqlite3"]
     assert int(evidence["copy_bytes"]) > 0
     assert float(evidence["copy_seconds"]) >= 0.0
     assert float(evidence["hash_seconds"]) >= 0.0
@@ -249,7 +255,9 @@ def test_the_copy_falls_back_to_the_system_temp_directory(tmp_path, monkeypatch)
     monkeypatch.setattr(Path, "mkdir", real_mkdir)
     assert result["ok"] is True
     assert result["evidence"]["workspace"] == "system_temp"
-    assert result["evidence"]["cleanup"] == "ok"
+    cleanup = result["evidence"]["cleanup"]
+    assert cleanup["state"] == "ok"
+    assert cleanup["kept"] == []
     assert not Path(str(result["evidence"]["path"])).exists()
 
 
