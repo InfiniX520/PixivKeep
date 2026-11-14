@@ -36,9 +36,11 @@ C4 core/decoder_registry.py            —— 能力门与适配器协议
         policy="strict" 且不可用 -> capability_unavailable（绝不 ok）
         policy="structure" -> 交给结构级，decode 记 "unavailable" 的原因
 
-C5 tests/test_decode_matrix.py         —— 跨模块验收矩阵（只写测试，用合成样本）
-   合法 PNG（含隔行）/ 截断 / 非法 filter / 巨幅超像素上限 / 非 PNG（JPEG/GIF/WebP 头）/
-   取消 / 超时；每条断言：状态、reason、以及**解码前后 sha256 一致**（只读证明）。
+C5 tests/png_samples.py + tests/test_png_samples.py —— 合成样本构造器（供主线程写跨模块矩阵用）
+   提供 build_valid_rgba() / build_interlaced() / build_bad_filter() / build_truncated() /
+   build_oversized_header() / build_gif_header() / build_jpeg_header() / build_webp_header()，
+   每个样本返回 bytes；测试用 struct/zlib 独立验证"这个样本确实是我声称的那种"（不依赖 C1–C4）。
+   跨模块验收矩阵由主线程在合流后用这些构造器写，避免 C5 在并行期依赖尚未合流的模块。
 ```
 
 ## 1. 手工造的合成样本（C5 负责，不下载图片）
