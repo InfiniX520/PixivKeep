@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
-from core.follow_coverage_counts import coverage_counts
+from core.follow_coverage_counts import COUNT_KEYS, DENOMINATOR_KEYS, coverage_counts
 from core.follow_coverage_state import (
     DECISION_STATES,
     DELIVERY_STATES,
@@ -37,20 +37,9 @@ from core.follow_coverage_state import (
 )
 from core.follow_coverage_text import render, render_text
 
-COUNT_KEYS = (
-    "artists_checked",
-    "artists_confirmed",
-    "artists_pending",
-    "artists_failed_pages",
-    "artists_coverage_unverified",
-    "artworks_seen",
-    "pages_saved",
-    "pages_already_verified",
-    "excluded_by_filter",
-    "unknown_fields",
-    "duplicate_pages",
-)
-DENOMINATOR_KEYS = ("artists_total", "artworks_total")
+# COUNT_KEYS / DENOMINATOR_KEYS are imported from the counters module: the
+# report shape has exactly one definition, so a key cannot be added on one side
+# and forgotten on the other.
 DIMENSIONS = ("enumeration", "decision", "delivery")
 PAGE_END_STATES = ("complete", "partial", "unknown")
 OVERALL_STATES = ("complete", "partial", "unknown")
@@ -300,18 +289,20 @@ def build_coverage(facts: object, *, scope: object) -> FollowCoverage:
     """Assemble the coverage summary for one run's facts."""
     facts = _facts(facts)
     scope_map = _scope(scope)
-    try:
-        states = coverage_states(facts)
-    except CoverageError:
-        raise
-    except ValueError as error:
-        raise CoverageError("facts_rejected_by_state", str(error)) from error
+    # Counters first: the delivery verdict reads the page evidence from them, so
+    # the states and the numbers cannot end up computed by two formulas.
     try:
         report = coverage_counts(facts)
     except CoverageError:
         raise
     except ValueError as error:
         raise CoverageError("facts_rejected_by_counts", str(error)) from error
+    try:
+        states = coverage_states(facts, counts=report)
+    except CoverageError:
+        raise
+    except ValueError as error:
+        raise CoverageError("facts_rejected_by_state", str(error)) from error
 
     enumeration = _dimension(states, "enumeration")
     decision = _dimension(states, "decision")

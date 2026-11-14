@@ -3,26 +3,32 @@
 Each builder returns a plain dict shaped like the frozen A1 contract::
 
     {"run": {run_id, account_ref, config_key, status, stop_reason, totals},
-     "artists": [{artist_id, state, pages, newest_illust_id}],
+     "artists": [{artist_id, state, works_seen, newest_illust_id}],
+     "pages": {expected, observed} | None,
      "incomplete": [{artist_id, reason}],
      "budget": {state, remaining} | None}
 
-Two things the contract did not spell out, and how they are carried here:
+Three things the contract did not spell out, and how they are carried here:
 
-* artist['pages'] is the number of works that artist showed this run - the
-  real A1 reads it from artist_progress.works_seen.  It is NOT the number of
-  pages saved: filters exclude works before any page is written, so
-  sum(pages) and pages_saved are different numbers on purpose.
+* artist['works_seen'] is the number of **works** that artist showed this run -
+  the real A1 reads it from artist_progress.works_seen.  It is NOT the number
+  of image pages: one work can be three pages, and filters exclude works before
+  any page is written, so sum(works_seen) and pages_saved are different numbers
+  on purpose.  The old spelling "pages" is still accepted at the DTO entry as
+  an alias, and a row carrying both spellings with different values is refused.
 * run-level counters (works seen, pages saved, filtered, unknown fields,
   duplicate pages, already-verified pages) live in run['totals'].  A real
   FollowCrawlRun does not carry them either, so A1 is expected to fill
   totals from the run summary it already refreshes; A3 then prefers totals
-  and falls back to summing the per-artist pages.  If that is the wrong home,
-  the contract needs one more key rather than a guess here.
+  and falls back to summing the per-artist work counts.
+* page evidence (the expected page set and per-page observations with a content
+  version) lives in facts['pages'].  These fixtures carry none, because the
+  crawl state store has none: that is exactly why their delivery verdict is
+  "unknown" and not "complete".
 
 Every fixture keeps these two identities true:
 
-    works_seen == sum(artist.pages)      (the artist list is the whole run)
+    works_seen == sum(artist.works_seen)      (the artist list is the whole run)
     works_seen == pages_saved + excluded_by_filter
 
 Nothing here touches a database or a real crawl.  The builders are
@@ -65,7 +71,7 @@ def _artist(artist_id: str, state: str, works: int, newest: str = "") -> dict[st
     return {
         "artist_id": artist_id,
         "state": state,
-        "pages": int(works),  # works_seen for this artist
+        "works_seen": int(works),
         "newest_illust_id": newest,
     }
 
