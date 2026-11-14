@@ -2341,6 +2341,16 @@ def _parser() -> argparse.ArgumentParser:
         help="恢复前检查这份文件组是不是一个一致状态（回滚库旁边留着非空 -wal 就是混合组）",
     )
     restore.add_argument("database", type=Path)
+    decode = commands.add_parser(
+        "decode-check", parents=[_COMMON],
+        help="只读检查图片的结构与解码维度；没有解码组件时如实报能力不可用",
+    )
+    decode.add_argument("paths", nargs="+", type=Path)
+    decode.add_argument("--structure-only", action="store_true", default=False,
+                        help="只做结构级，不要求解码（默认要求解码；没有解码组件时如实报能力不可用）")
+    decode.add_argument("--max-pixels", type=int, default=None, help="单文件像素上限")
+    decode.add_argument("--max-bytes", type=int, default=None, help="单文件字节上限")
+    decode.add_argument("--max-seconds", type=float, default=None, help="单文件解码秒数上限")
     scan = commands.add_parser(
         "scan", parents=[_COMMON], help="只读巡检已交付的文件是否还和记录一致"
     )
@@ -2626,6 +2636,49 @@ def _scan_lines(report: dict[str, object], *, continuation: bool = False) -> lis
     return lines
 
 
+def _decode_outcome(reports: list[dict[str, object]]) -> int:
+    """2 when a file is known bad, 5 when it could not be judged, 0 when all passed."""
+    structure = [
+        str((item.get("quality") or {}).get("structure", {}).get("state"))
+        for item in reports
+    ]
+    decode = [
+        str((item.get("quality") or {}).get("decode", {}).get("state"))
+        for item in reports
+    ]
+    if "failed" in structure or "failed" in decode:
+        return 2
+    if any(state != "ok" for state in structure) or any(state != "ok" for state in decode):
+        return _EXIT_INCOMPLETE
+    return 0
+
+
+def _decode_lines(reports: list[dict[str, object]], code: int) -> list[str]:
+    """One block per file; the words come from the five dimensions."""
+    lines: list[str] = []
+    for item in reports:
+        quality = item.get("quality") or {}
+        lines.append("文件: %s" % item["path"])
+        for name, label in (("structure", "结构"), ("decode", "解码"), ("pages", "页")):
+            entry = quality.get(name) or {}
+            reason = entry.get("reason")
+            lines.append("  %s: %s%s" % (label, entry.get("state"), ("（%s）" % reason) if reason else ""))
+        if item.get("receipt"):
+            receipt = item["receipt"]
+            lines.append(
+                "  解码收据: %s 帧 %s 像素 用时 %ss"
+                % (receipt.get("frames"), receipt.get("pixels"), receipt.get("seconds"))
+            )
+        lines.append("  字节未变: %s" % ("是" if item.get("unchanged") else "否"))
+    if code == 0:
+        lines.append("结论: 每个文件的解码都真的执行并通过。")
+    elif code == 2:
+        lines.append("结论: 有文件解码失败；这不是能力缺失，是内容没读通。")
+    elif code == _EXIT_INCOMPLETE:
+        lines.append("结论: 没有全部解码通过——原因见上面的「解码」维度（未请求/能力不可用/超限/取消）。")
+    return lines
+
+
 def _report_scan_error(as_json: bool, code: str, detail: str) -> None:
     """One error shape for the whole scan command, text and JSON alike."""
     if as_json:
@@ -2897,6 +2950,34 @@ def main(argv: list[str] | None = None) -> int:
                     % report["stats"]["unknown"]
                 )
             _emit(report, as_json, lines)
+            return code
+        if arguments.command == "decode-check":
+            from core.decode_limits import DecodeLimits
+            from core.quality_check import DEFAULT_LIMITS, check_file
+
+            limits = DecodeLimits(
+                max_bytes=arguments.max_bytes or DEFAULT_LIMITS.max_bytes,
+                max_pixels=arguments.max_pixels or DEFAULT_LIMITS.max_pixels,
+                max_frames=DEFAULT_LIMITS.max_frames,
+                max_seconds=arguments.max_seconds or DEFAULT_LIMITS.max_seconds,
+            )
+            policy = "structure" if arguments.structure_only else "strict"
+            reports = []
+            for target in arguments.paths:
+                try:
+                    reports.append(check_file(target, decode_policy=policy, limits=limits))
+                except OSError as error:
+                    _report_scan_error(as_json, "image_unreadable", "%s: %s" % (target, error))
+                    return 3
+            code = _decode_outcome(reports)
+            payload = {
+                "question": "image_quality",
+                "decode_policy": policy,
+                "limits": limits.as_dict(),
+                "files": reports,
+                "exit_code": code,
+            }
+            _emit(payload, as_json, _decode_lines(reports, code))
             return code
         if arguments.command == "restore-check":
             report = restore_check(arguments.database)

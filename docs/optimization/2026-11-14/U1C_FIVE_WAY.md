@@ -50,7 +50,7 @@ C5 tests/png_samples.py + tests/test_png_samples.py —— 合成样本构造器
 ## 2. 主线程合流后做
 
 - `core/image_validation.py` 增加 `decode_policy=("structure"|"strict")`（默认 structure，现有 2 处调用点行为不变）；
-- `maintain.py scan` 增加 `--decode`（默认关），行里带出 decode 维度；
+- ~~`maintain.py scan --decode`~~ → 改为独立 `maintain.py decode-check <文件...>`（默认要求解码，`--structure-only` 退回结构级）。理由见 [U1C_QUALITY_EVIDENCE.md](U1C_QUALITY_EVIDENCE.md) §4：把解码塞进带游标与预算的 scan 会同时改变预算语义并混淆 coverage；扫描接线留到性能那一轮单独评估。
 - 文档 `docs/optimization/2026-11-14/U1C_QUALITY_EVIDENCE.md`：五维表、能力门规则、上限与取消语义、**"未安装解码器"的明确声明**。
 
 ## 3. 验收
