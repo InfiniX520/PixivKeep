@@ -61,3 +61,35 @@ def test_a_missing_file_is_three_not_a_traceback(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert code == 3
     assert payload["status"] == "error"
+
+
+def test_a_zero_limit_is_refused_instead_of_silently_replaced(tmp_path, capsys):
+    """--max-bytes 0 used to fall back to 256 MiB through an "x or default".
+
+    A limit that cannot be honoured is a rejected argument: exit 4, no
+    traceback, no quiet substitution.
+    """
+    path = _write(tmp_path, "valid.png", samples.build_valid_rgba())
+    code = main(["decode-check", str(path), "--max-bytes", "0"])
+    captured = capsys.readouterr()
+    assert code == 4
+    assert "参数被拒" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_a_negative_limit_is_a_refusal_with_the_json_shape(tmp_path, capsys):
+    path = _write(tmp_path, "valid.png", samples.build_valid_rgba())
+    code = main(["--json", "decode-check", str(path), "--max-pixels", "-1"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 4
+    assert payload["status"] == "error"
+    assert payload["code"] == "invalid_argument"
+    assert "max_pixels" in payload["detail"]
+
+
+def test_an_explicit_limit_that_can_be_honoured_still_runs(tmp_path, capsys):
+    path = _write(tmp_path, "valid.png", samples.build_valid_rgba())
+    code = main(["decode-check", str(path), "--max-bytes", "1000000"])
+    printed = capsys.readouterr().out
+    assert code == 0
+    assert "解码: ok" in printed

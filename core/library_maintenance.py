@@ -2955,12 +2955,39 @@ def main(argv: list[str] | None = None) -> int:
             from core.decode_limits import DecodeLimits
             from core.quality_check import DEFAULT_LIMITS, check_file
 
-            limits = DecodeLimits(
-                max_bytes=arguments.max_bytes or DEFAULT_LIMITS.max_bytes,
-                max_pixels=arguments.max_pixels or DEFAULT_LIMITS.max_pixels,
-                max_frames=DEFAULT_LIMITS.max_frames,
-                max_seconds=arguments.max_seconds or DEFAULT_LIMITS.max_seconds,
-            )
+            # "not given" and "given as zero" are different answers: the old
+            # "x or default" spelling turned --max-bytes 0 into 256 MiB, i.e. it
+            # silently ignored an explicit zero.  A limit that cannot be honoured
+            # is a rejected argument (exit 4), never a traceback.
+            try:
+                limits = DecodeLimits(
+                    max_bytes=DEFAULT_LIMITS.max_bytes
+                    if arguments.max_bytes is None
+                    else arguments.max_bytes,
+                    max_pixels=DEFAULT_LIMITS.max_pixels
+                    if arguments.max_pixels is None
+                    else arguments.max_pixels,
+                    max_frames=DEFAULT_LIMITS.max_frames,
+                    max_seconds=DEFAULT_LIMITS.max_seconds
+                    if arguments.max_seconds is None
+                    else arguments.max_seconds,
+                )
+            except ValueError as error:
+                if as_json:
+                    print(
+                        json.dumps(
+                            {
+                                "status": "error",
+                                "code": "invalid_argument",
+                                "detail": str(error),
+                            },
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                    )
+                else:
+                    print("参数被拒: %s" % error, file=sys.stderr)
+                return _EXIT_REFUSED
             policy = "structure" if arguments.structure_only else "strict"
             reports = []
             for target in arguments.paths:

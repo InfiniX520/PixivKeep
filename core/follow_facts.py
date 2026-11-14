@@ -17,6 +17,17 @@ A source is anything with:
 Missing required pieces raise TypeError: a source that cannot answer is not
 the same thing as a run with no artists.
 
+Two of those four calls do not take a run id in the real code base.  The crawl
+state store keys everything by run_id, but FollowRepositoryMixin keys
+incomplete_artists by job_id and source_budget_status by batch_id.  This module
+forwards whatever the caller hands it, so wiring the repository straight in -
+StateSource(repository, run_id, incomplete=repository.incomplete_artists) -
+does not fail loudly: it returns an empty list for every run, and the summary
+quietly loses its "which artists did not finish" note.  Counters and verdicts
+are not affected (they come from the artist rows), which is exactly why the
+mistake is easy to miss.  Pass a provider closed over the right id space, or
+leave the optional reads out and let the summary say less.
+
 Each artist row also carries ``swept_at``: the moment this run finished the
 incremental sweep for that artist, or the empty string when the run has no
 such evidence.  This module only passes the value through - it does not parse
