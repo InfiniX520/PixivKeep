@@ -157,3 +157,101 @@ class Budget:
             "elapsed_seconds": round(self._clock() - self._started, 6),
             "limits": self.limits.as_dict(),
         }
+
+
+#: The scope of a budget that covers a whole command, not one decode.
+COMMAND_SCOPE = "command"
+
+
+class CommandBudget:
+    """One command's budget: every stage charges the same counters.
+
+    A Budget answers for one decode.  A quality check is not one decode: it
+    hashes the file for a content version, walks the structure, then decodes -
+    and a budget that only covers the last stage lets the first two spend
+    unbounded work before any limit is consulted.  This wrapper keeps one
+    counter set for the whole command, names each stage as it starts, and
+    hands the *remaining* allowance to the next stage.
+
+    The counters are single-use and monotone, exactly like Budget: a snapshot
+    describes everything that was looked at, including the stage that hit a
+    limit.
+    """
+
+    scope = COMMAND_SCOPE
+
+    __slots__ = ("limits", "_budget", "_stop", "_stage", "_stages")
+
+    def __init__(self, limits: DecodeLimits, *, stop: Stop | None = None,
+                 clock=time.perf_counter) -> None:
+        if not isinstance(limits, DecodeLimits):
+            raise TypeError("limits must be DecodeLimits, got %r" % (type(limits).__name__,))
+        self.limits = limits
+        self._budget = Budget(limits, clock=clock)
+        self._stop = stop
+        self._stage = "created"
+        self._stages: list[str] = []
+
+    # -- the stage boundary ---------------------------------------------
+    def enter(self, stage: str) -> str | None:
+        """Name the stage that is about to run and answer stop/time."""
+        self._stage = str(stage)
+        self._stages.append(self._stage)
+        return self.check()
+
+    def check(self) -> str | None:
+        """cancel / time_limit, or None when the stage may start."""
+        reason = self._budget.check_stop(self._stop)
+        if reason is not None:
+            return reason
+        return self._budget.check_time()
+
+    # -- what a stage spent ---------------------------------------------
+    def charge(self, count: int) -> str | None:
+        """Account count more bytes read by the current stage."""
+        return self._budget.check_bytes(count)
+
+    def charge_pixels(self, width: int, height: int) -> str | None:
+        return self._budget.check_pixels(width, height)
+
+    # -- what is left for the next stage --------------------------------
+    def remaining_bytes(self) -> int:
+        return self.limits.max_bytes - self._budget.snapshot()["bytes"]
+
+    def remaining_seconds(self) -> float:
+        return self.limits.max_seconds - self._budget.snapshot()["elapsed_seconds"]
+
+    def grant(self) -> DecodeLimits | None:
+        """The allowance a further stage may spend, or None when it has none.
+
+        The pixel and frame ceilings are not consumed by the earlier stages, so
+        they pass through unchanged; bytes and seconds are what the version
+        hash and the structure walk already spent.
+        """
+        remaining_bytes = self.remaining_bytes()
+        remaining_seconds = self.remaining_seconds()
+        if remaining_bytes <= 0 or remaining_seconds <= 0:
+            return None
+        return DecodeLimits(
+            max_bytes=max(1, int(remaining_bytes)),
+            max_pixels=self.limits.max_pixels,
+            max_frames=self.limits.max_frames,
+            max_seconds=max(1e-6, float(remaining_seconds)),
+        )
+
+    def refusal(self) -> str | None:
+        """Why a further stage cannot start, or None when it can."""
+        if self.remaining_bytes() <= 0:
+            return "bytes_limit"
+        if self.remaining_seconds() <= 0:
+            return "time_limit"
+        return None
+
+    # -- facts ----------------------------------------------------------
+    def snapshot(self) -> dict:
+        """What the whole command has spent so far; for receipts, not verdicts."""
+        facts = self._budget.snapshot()
+        facts["scope"] = COMMAND_SCOPE
+        facts["stages"] = list(self._stages)
+        facts["stage"] = self._stage
+        return facts

@@ -37,6 +37,10 @@ from core.decode_limits import Budget, DecodeLimits
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 _BLOCK = 64 * 1024
+#: How many unfiltered bytes may pass between two cancellation checks.  One row
+#: of a large image is millions of bytes, and a stop that is only noticed at the
+#: row boundary is not a bound on the delay.
+_POLL_EVERY = 64 * 1024
 _MAX_CHUNK_LENGTH = 0x7FFFFFFF
 _KIND = re.compile(rb"[A-Za-z]{4}")
 _VALID_BITS = {0: {1, 2, 4, 8, 16}, 2: {8, 16}, 3: {1, 2, 4, 8}, 4: {8, 16}, 6: {8, 16}}
@@ -109,21 +113,31 @@ class _Scanlines:
     have different widths, read past the buffer).
     """
 
-    def __init__(self, width: int, height: int, bits: int, channels: int, interlace: int):
+    def __init__(self, width: int, height: int, bits: int, channels: int, interlace: int,
+                 *, indexed: bool = False):
         self.bpp = max(1, bits * channels // 8)
+        self.bits = bits
+        self.indexed = indexed
+        #: How many entries the PLTE chunk declared; None until it is read.
+        self.palette_entries: int | None = None
         passes = _ADAM7 if interlace else ((0, 0, 1, 1),)
-        self.plan: list[tuple[int, int]] = []
+        #: One entry per non-empty pass: (row bytes, rows, pixels in a row).
+        self.plan: list[tuple[int, int, int]] = []
         for x, y, dx, dy in passes:
             columns = 0 if width <= x else (width - x + dx - 1) // dx
             rows = 0 if height <= y else (height - y + dy - 1) // dy
             if columns and rows:
-                self.plan.append(((columns * bits * channels + 7) // 8, rows))
-        self.expected_rows = sum(rows for _row_bytes, rows in self.plan)
+                self.plan.append(((columns * bits * channels + 7) // 8, rows, columns))
+        self.expected_rows = sum(rows for _row_bytes, rows, _columns in self.plan)
         self.index = 0
         self.rows_left = self.plan[0][1] if self.plan else 0
         self.row = bytearray()
         self.previous = bytearray()
         self.rows_unfiltered = 0
+        #: Called every _POLL_EVERY bytes of a row so a cancel or a time limit is
+        #: noticed inside a long row, not only between rows.  None means the
+        #: caller did not ask for polling.
+        self.poll = None
         #: Digest of the reconstructed pixel rows, in pass order: the only
         #: externally checkable proof that the filters were reversed.
         self.hasher = hashlib.sha256()
@@ -159,7 +173,10 @@ class _Scanlines:
             out = bytearray(row_bytes)
             previous = self.previous
             bpp = self.bpp
+            poll = self.poll
             for index in range(row_bytes):
+                if poll is not None and index % _POLL_EVERY == 0:
+                    poll()
                 value = raw[index]
                 left = out[index - bpp] if index >= bpp else 0
                 up = previous[index] if index < len(previous) else 0
@@ -177,9 +194,48 @@ class _Scanlines:
                 else:
                     value += _paeth(left, up, upper_left)
                 out[index] = value & 0xFF
+        self._check_indices(out, self.plan[self.index][2])
         self.previous = out
         self.hasher.update(out)
         self.rows_unfiltered += 1
+
+    def set_palette(self, entries: int) -> None:
+        """The palette size is only known once PLTE is read; rows may follow it."""
+        self.palette_entries = int(entries)
+
+    def _check_indices(self, out: bytearray, columns: int) -> None:
+        """Every decoded sample must address an entry that PLTE declared.
+
+        PNG 11.2.2 makes an index outside the palette an error.  A decoder is
+        allowed to *display* something for it, but this check is the strict one:
+        "recoverable" is not "valid", and a strict pass that silently repairs is
+        how a wrong image gets a green receipt.
+
+        Padding bits at the end of a row are not samples: the loop stops at the
+        pixel count of this pass, which is what differs between Adam7 passes.
+        """
+        palette = self.palette_entries
+        if not self.indexed or palette is None or columns <= 0:
+            return
+        bits = self.bits
+        if bits == 8:
+            if max(memoryview(out)[:columns]) >= palette:
+                raise _Halt("failed", "palette_index_out_of_range")
+            return
+        per_byte = 8 // bits
+        mask = (1 << bits) - 1
+        limit = min(len(out), (columns + per_byte - 1) // per_byte)
+        last = columns - 1
+        for position in range(limit):
+            byte = out[position]
+            first = position * per_byte
+            for slot in range(per_byte):
+                index = first + slot
+                if index > last:
+                    return
+                shift = 8 - bits * (slot + 1)
+                if (byte >> shift) & mask >= palette:
+                    raise _Halt("failed", "palette_index_out_of_range")
 
     def complete(self) -> bool:
         return self.rows_unfiltered == self.expected_rows and self.index >= len(self.plan)
@@ -234,6 +290,7 @@ def decode_png(stream, *, limits=None, stop=None) -> dict:
         seen_data = False
         first_chunk = True
         completed = False
+        palette_entries = None
         while True:
             length, kind = struct.unpack(">I4s", source.take(8))
             _poll(budget, stop)
@@ -259,10 +316,15 @@ def decode_png(stream, *, limits=None, stop=None) -> dict:
                 reason = budget.check_pixels(width, height)
                 if reason is not None:
                     raise _Halt("undecided", reason)
-                scanlines = _Scanlines(width, height, bits, _CHANNELS[color], interlace)
+                scanlines = _Scanlines(width, height, bits, _CHANNELS[color], interlace,
+                                       indexed=(color == 3))
+                scanlines.poll = lambda: _poll(budget, stop)
             elif kind == b"IDAT":
                 if scanlines is None:
                     raise _Halt("failed", "missing_ihdr")
+                if color == 3 and palette_entries is None:
+                    # An indexed image without a palette has nothing to address.
+                    raise _Halt("failed", "missing_plte")
                 seen_data = True
                 remaining = length
                 while remaining:
@@ -302,9 +364,25 @@ def decode_png(stream, *, limits=None, stop=None) -> dict:
                 completed = True
             elif kind == b"acTL":
                 raise _Halt("failed", "apng_unsupported")
-            elif kind == b"PLTE" or kind[0] & 0x20:
-                if kind == b"PLTE" and seen_data:
+            elif kind == b"PLTE":
+                if seen_data:
                     raise _Halt("failed", "bad_chunk_order")
+                if palette_entries is not None:
+                    raise _Halt("failed", "duplicate_plte")
+                if color in (0, 4):
+                    # A palette is meaningless for greyscale; the spec forbids it.
+                    raise _Halt("failed", "plte_not_allowed")
+                if length == 0 or length % 3 or length > 768:
+                    raise _Halt("failed", "bad_plte")
+                remaining = length
+                while remaining:
+                    piece = source.take(min(remaining, _BLOCK))
+                    crc = zlib.crc32(piece, crc)
+                    remaining -= len(piece)
+                palette_entries = length // 3
+                if scanlines is not None:
+                    scanlines.set_palette(palette_entries)
+            elif kind[0] & 0x20:
                 remaining = length
                 while remaining:
                     piece = source.take(min(remaining, _BLOCK))
