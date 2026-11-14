@@ -281,3 +281,30 @@ def test_a_palette_png_skips_plte_and_decodes_rows():
     result = png_decode.decode_png(_stream(image))
     assert result["state"] == "ok", result
     assert result["pixels_sha256"] == digest(row)
+
+
+def test_idat_split_over_several_chunks_is_one_stream():
+    row = bytes(range(0, 8))
+    compressed = zlib.compress(b"\x00" + row + b"\x00" + row)
+    cut = len(compressed) // 2
+    parts = [header(2, 2),
+             chunk(b"IDAT", compressed[:cut]),
+             chunk(b"IDAT", compressed[cut:]),
+             chunk(b"IEND", b"")]
+    result = png_decode.decode_png(_stream(png(parts)))
+    assert result["state"] == "ok", result
+    assert result["rows_unfiltered"] == 2
+    assert result["pixels_sha256"] == digest(row + row)
+
+
+def test_a_large_image_crosses_the_block_boundary():
+    width = height = 400
+    row = bytes((index * 7) & 0xFF for index in range(width * 3))
+    raw = (b"\x00" + row) * height
+    assert len(raw) > 64 * 1024
+    image = raw_png(width, height, [b""], color=2, bits=8, idat=zlib.compress(raw))
+    result = png_decode.decode_png(_stream(image))
+    assert result["state"] == "ok", result
+    assert result["rows_unfiltered"] == height
+    expected = b"".join(raw[index + 1:index + 1 + width * 3] for index in range(0, len(raw), width * 3 + 1))
+    assert result["pixels_sha256"] == digest(expected)
