@@ -452,16 +452,20 @@ def test_a_member_without_a_reported_identity_is_never_deleted(tmp_path, monkeyp
 
     monkeypatch.setattr(os, "fstat", anonymous_once)
     opaque = workspace.claim("opaque.bin")
-    opaque.write_bytes(b"written while the volume would not say which file this is")
+    # The bytes are written through the *name*, outside the claim on purpose:
+    # this test is about what the cleanup does with a member whose identity the
+    # volume never reported, not about the write path (which refuses such a
+    # claim outright, see test_a_claim_without_an_identity_is_never_written).
+    Path(opaque).write_bytes(b"written while the volume would not say which file this is")
     monkeypatch.setattr(os, "fstat", real_fstat)
     plain = workspace.claim("plain.bin")
-    plain.write_bytes(b"plain")
+    Path(plain).write_bytes(b"plain")
     cleanup = workspace.discard()
     assert {"name": "opaque.bin", "reason": "identity_unavailable"} in cleanup["kept"]
     assert cleanup["removed"] == ["plain.bin"]
     assert cleanup["state"] != "ok"
-    assert opaque.exists() and opaque.stat().st_size > 0
-    assert not plain.exists()
+    assert Path(opaque).exists() and Path(opaque).stat().st_size > 0
+    assert not Path(plain).exists()
 
 
 def test_a_directory_without_a_reported_identity_is_left_alone(tmp_path, monkeypatch):

@@ -554,7 +554,21 @@ def test_a_file_group_backup_refuses_a_source_that_moves_during_the_copy(tmp_pat
         )
     assert info.value.code == "backup_verification_failed", info.value.detail
     assert "library_changed_during_copy" in info.value.detail
-    assert not (tmp_path / "backups" / "moving").exists()
+    target = tmp_path / "backups" / "moving"
+    # A failed backup must not look like a finished one: no manifest.
+    assert not (target / m.MANIFEST_NAME).exists()
+    # Whatever is left stays *only* because it cannot be proven this run's.
+    # SQLite creates -wal/-shm beside the copy when the copy is inspected, and a
+    # name plus a suffix is not a provenance, so the cleanup keeps them and the
+    # error detail names the directory instead of deleting a possible stranger.
+    if target.exists():
+        assert str(target) in info.value.detail
+        assert "kept=" in info.value.detail
+        assert {item.name for item in target.iterdir()} <= {
+            "library.sqlite3",
+            "library.sqlite3-wal",
+            "library.sqlite3-shm",
+        }
 
 
 def test_a_backup_of_an_unhealthy_but_readable_library_is_faithful(tmp_path):
