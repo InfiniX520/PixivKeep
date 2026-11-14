@@ -346,23 +346,23 @@
     "active_workstream": {
       "id": "JPGPNG-OPTIMIZATION-AND-ARCHIVING",
       "updated_date": "2026-11-14",
-      "phase": "Post-tidy closure independent audit: 1 P1 + 5 P2 remain; Tk root cause separate",
-      "status": "independently_audited_repairs_required",
-      "resume": "docs/audits/2026-11-14-post-tidy-closure/DEVELOPMENT_GUIDE.md",
-      "next_step": "S0 contract, S1 owned cleanup and error lifecycle, S2 prefix semantics, S3 refresh generation, S4 archive identity; S5 Tk diagnosis separately",
+      "phase": "Post-tidy re-audit closure: CL-01/CL-02/CL-03 and the remaining WR-04/WR-06/PA-03 items closed with behavioural evidence",
+      "status": "product_fixes_closed_pending_release_decision",
+      "resume": "docs/maintenance/2026-11-14_jpgpng_post_tidy_closure_r2.md",
+      "next_step": "Diagnose the Tk teardown race (S5) with the same interpreter, order and process organisation; then a separate batch for a real-library restore drill and a real archive batch.",
       "supersedes": "W5/W6 proof closeout as the previous historical batch; preserves U1-U4, A1-A6 and E1 detailed plans",
       "started_jobs": [],
-      "latest_batch": "JPGPNG-POST-TIDY-CLOSURE-AUDIT-20261114-01",
-      "foundation": "docs/optimization/2026-11-14/U1A_MAINTENANCE_CLOSURE_CONTRACT_V6_AMD1.md",
-      "evidence": "docs/audits/2026-11-14-post-tidy-closure/evidence/results.json",
+      "latest_batch": "JPGPNG-POST-TIDY-CLOSURE-R2-20261114-01",
+      "foundation": "docs/optimization/2026-11-14/U1A_MAINTENANCE_CLOSURE_CONTRACT_V6_AMD2.md",
+      "evidence": "docs/maintenance/2026-11-14_jpgpng_post_tidy_closure_r2.md",
       "previous_completed_batch": "JPGPNG-POST-TIDY-CLOSURE-20261114-01",
-      "unfinished_draft": "CL-01 P1; WR-04/CL-02/CL-03/WR-06/PA-03 P2; known Tk stability unclosed; no production restore or archival apply",
-      "latest_repair_evidence": "docs/maintenance/2026-11-14_jpgpng_post_tidy_closure.md",
+      "unfinished_draft": "Tk teardown race still open (baseline flakes too); real-library restore, real archive apply() and cross-volume identity not drilled; the 600447-file pre-move identity baseline cannot be reconstructed.",
+      "latest_repair_evidence": "docs/maintenance/2026-11-14_jpgpng_post_tidy_closure_r2.md",
       "latest_overview": "docs/audits/2026-11-14-post-tidy-closure/README.md",
-      "latest_evidence": "docs/audits/2026-11-14-post-tidy-closure/evidence/results.json",
+      "latest_evidence": "docs/maintenance/2026-11-14_jpgpng_post_tidy_closure_r2.md",
       "audited_commit": "9ee62068273324848a83061662d86ce9da46876c",
-      "fixed_commit": "9ee62068273324848a83061662d86ce9da46876c",
-      "runtime_checkout_note": "Daily 4ba891e unchanged. Candidate 9ee6206 has unresolved audit findings. This audit changes only reports, synthetic probes and navigation; no deployment."
+      "fixed_commit": "61264d0eac32060233ee02286e7c9b499cea96d1",
+      "runtime_checkout_note": "Daily branch remains daily/u1a-w5-w6-20261114 at 4ba891e until the user switches. This round changed product code on fix/a1-post-tidy-r2-20261114 only: no deployment, no database restore, real library read-only. Restore gate is maintain.cmd verify <backup dir>; compare is not a gate."
     },
     "archiving_design": {
       "id": "JPGPNG-ARCHIVE-DESIGN-20261111-01",
@@ -1420,6 +1420,81 @@
       "product_source_changed": false,
       "business_data_changed": false,
       "deployed": false
+    },
+    "post_tidy_closure_r2": {
+      "id": "JPGPNG-POST-TIDY-CLOSURE-R2-20261114-01",
+      "status": "gap_classes_closed_pending_release_decision",
+      "branch": "fix/a1-post-tidy-r2-20261114",
+      "baseline": "99494b1",
+      "contract": "docs/optimization/2026-11-14/U1A_MAINTENANCE_CLOSURE_CONTRACT_V6_AMD2.md",
+      "record": "docs/maintenance/2026-11-14_jpgpng_post_tidy_closure_r2.md",
+      "closed": [
+        "CL-01",
+        "WR-04",
+        "CL-02",
+        "CL-03",
+        "WR-06",
+        "PA-03"
+      ],
+      "verification": {
+        "reaudit_counterexamples": {
+          "tests": 14,
+          "passed": 14,
+          "seconds": 3.497,
+          "before": "12 failed / 2 passed"
+        },
+        "previous_boundaries": {
+          "tests": 10,
+          "passed": 10
+        },
+        "w5w6_boundaries": {
+          "tests": 12,
+          "passed": 12
+        },
+        "suite": {
+          "tests": 2287,
+          "passed": 2283,
+          "skipped": 4,
+          "failures": 0,
+          "errors": 0,
+          "seconds": 626.963
+        },
+        "tk_view": {
+          "tests": 25,
+          "passed": 25
+        },
+        "tk_display": {
+          "tests": 9,
+          "passed": 9,
+          "method": "one module per process"
+        },
+        "archive_tool": {
+          "tests": 21,
+          "passed": 21
+        },
+        "whole_suite": {
+          "tests": 2321,
+          "passed": 2317,
+          "skipped": 4,
+          "failures": 0,
+          "errors": 0
+        },
+        "real_library": {
+          "bytes": 4435968,
+          "sha256_unchanged": true,
+          "record_backups_unchanged": true,
+          "verify_workspace_leftovers": 0
+        }
+      },
+      "open_risks": [
+        "Tk teardown race: intermittent, baseline flakes too, root cause unproven",
+        "real-library restore not drilled",
+        "versioned archive collector apply() ran on synthetic batches only",
+        "cross-volume identity not measured on real hardware",
+        "old collector still on disk with old behaviour; only tools/maintenance may be used"
+      ],
+      "deployed": false,
+      "merged_to_main": false
     }
   }
 }

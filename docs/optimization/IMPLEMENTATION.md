@@ -212,6 +212,22 @@ MISSING 短缓存只允许调度/hold，不变成健康证据；不盲目重复�
 
 未合并 main、未部署、未恢复真实库；真实库只做只读 `inspect`/`scan`/`verify`。
 
+## 4O. 本轮：JPGPNG-POST-TIDY-CLOSURE-R2-20261114-01（复审 6 类缺口关闭）
+
+从 `99494b1`（审计报告 + 上轮实现说明）建立 `fix/a1-post-tidy-r2-20261114`，冻结[契约 AMD2](../optimization/2026-11-14/U1A_MAINTENANCE_CLOSURE_CONTRACT_V6_AMD2.md)，四个工作包并行、文件独占：
+
+- **CL-01 P1（清理越权）**：新建 `core/workspace_ownership.py`。`TemporaryWorkspace` 在创建时记录目录身份，成员创建后逐个登记；`discard()` 只删仍匹配的已登记成员，**不进入任何重解析点**（Windows junction 在 `is_dir(follow_symlinks=False)` 下仍是目录，这正是旧 `_discard` 递归删掉链接目标的原因），未登记/同名替换/身份未知/不可读一律保留并报告。清理结论与核验结论分开：`cleanup.state` 不改变 `ok`。
+- **WR-04 剩余 P2**：备份从 `mkdir` 到 manifest 原子完成进入同一失败边界；晚期失败 `backup_manifest_failed` 且 detail 带 `residual=`；清理失败不覆盖主因；成员名控制字符在任何文件操作前拒绝（`manifest_member_invalid`、退出 3）；暂存区不可建立 → `exit_code=3`（原来错给 2）。
+- **CL-02 P2**：`restore-check` 改为判定表（`unobservable`/`library_missing`/`not_usable`/`wal_unreadable`/`orphan_wal`/`ok`），WAL 读不到写 `null` 而不是 0；文本分开陈述「内容健康 / 可打开 / 组一致 / 未观察」。
+- **CL-03 P2**：`resume.complete_prefix` 恒 `False`（游标只是「可以从哪继续」），`state` 四值；没有证明链就不发证书。
+- **WR-06 剩余 P2**：新增 `_verification_generation`，刷新同步换代次、摘 watcher、清行与摘要、立刻发新请求；成功与错误回调都过 `(epoch, generation, batch)`；不再用 `Future.cancel()`。
+- **PA-03 剩余 P2**：采集器迁入 `tools/maintenance/`（版本化，不依赖产品代码），身份拆 `handle_identity/path_binding/content` 三分量；路径身份未知时整体 `unknown`，已知冲突不被另一项 unknown 遮住。
+
+验证：复审 14 条 **14/14 绿**（原 12 红 2 绿）；上一轮 10 条与 WC 12 条未回退；主体 **2,287 项 2,283 通过 / 4 跳过 / 0 失败**，`test_collection_view` 25/25、两个展示模块 4/4 与 5/5 各自独立进程；整套 **2,321 项**。真实库只读对照不变（4,435,968 字节、`sha256` 前后一致），`verify` 的 `evidence.cleanup` 在真实备份上为 `ok`。
+
+仍列明：Tk 拆除稳定性未闭环（本轮只攒数据，基线同样间歇失败）、真实库恢复与真实归档 `apply()` 未演练、跨卷身份未实测、旧采集器仍在 `.runtime` 但不应再用。详见[维护记录](../maintenance/2026-11-14_jpgpng_post_tidy_closure_r2.md)。
+
+未合并 main、未部署；日常目录仍为 `4ba891e`。
 ## 5. 接续记录规则
 
 机器当前入口：[TASK_PLAN.json](../../TASK_PLAN.json) 的 `current_plan.active_workstream` 和 `current_plan.unified_implementation`；追加历史：[LOG.json](../../LOG.json)；维护记录：[本批实施说明](../../../docs/maintenance/2026-11-11_jpgpng_unified_implementation.md)。归档专项阶段继续在[归档实施日志](../archiving/IMPLEMENTATION_LOG.md)记细节，并链接回本页。

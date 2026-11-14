@@ -2231,6 +2231,70 @@
       "business_data_changed": false,
       "deployed": false,
       "merged_to_main": false
+    },
+    {
+      "id": "JPGPNG-POST-TIDY-CLOSURE-R2-20261114-01",
+      "session_date": "2026-11-14",
+      "status": "gap_classes_closed_pending_release_decision",
+      "summary": "Closed the re-audit 6 classes: owned temporary cleanup that never enters a reparse point, one failure boundary for the whole backup lifecycle with typed errors, a restore-check decision table, complete_prefix always false, per-read query generations in the verification page, and a versioned archive collector with handle/path/content identity separated.",
+      "audited_commit": "9ee62068273324848a83061662d86ce9da46876c",
+      "product_baseline": "99494b15e171df3c7c32c68465b2147fb061d010",
+      "report": "docs/maintenance/2026-11-14_jpgpng_post_tidy_closure_r2.md",
+      "contract": "docs/optimization/2026-11-14/U1A_MAINTENANCE_CLOSURE_CONTRACT_V6_AMD2.md",
+      "results": {
+        "reaudit_counterexamples": {
+          "tests": 14,
+          "passed": 14,
+          "before": "12 failed / 2 passed"
+        },
+        "previous_boundaries": {
+          "tests": 10,
+          "passed": 10
+        },
+        "w5w6_boundaries": {
+          "tests": 12,
+          "passed": 12
+        },
+        "suite": {
+          "tests": 2287,
+          "passed": 2283,
+          "skipped": 4,
+          "failures": 0,
+          "errors": 0,
+          "seconds": 626.963
+        },
+        "whole_suite": {
+          "tests": 2321,
+          "passed": 2317,
+          "skipped": 4,
+          "failures": 0,
+          "errors": 0
+        },
+        "real_library": {
+          "bytes": 4435968,
+          "sha256_unchanged": true,
+          "record_backups_unchanged": true
+        }
+      },
+      "new_findings": [
+        "CL-01 (P1)",
+        "CL-02",
+        "CL-03",
+        "WR-04 remaining",
+        "WR-06 remaining",
+        "PA-03 remaining"
+      ],
+      "previous_product_findings_open": "none",
+      "open_risks": [
+        "Tk teardown race is intermittent and the untouched baseline flakes too; root cause unproven",
+        "real-library restore not drilled",
+        "the versioned archive collector apply() ran on synthetic batches only",
+        "cross-volume identity not measured"
+      ],
+      "product_source_changed": true,
+      "business_data_changed": false,
+      "deployed": false,
+      "merged_to_main": false
     }
   ]
 }
