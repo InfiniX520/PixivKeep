@@ -37,6 +37,10 @@ from core.decode_limits import Budget, DecodeLimits
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 _BLOCK = 64 * 1024
+#: How many unfiltered bytes may pass between two cancellation checks.  One row
+#: of a large image is millions of bytes, and a stop that is only noticed at the
+#: row boundary is not a bound on the delay.
+_POLL_EVERY = 64 * 1024
 _MAX_CHUNK_LENGTH = 0x7FFFFFFF
 _KIND = re.compile(rb"[A-Za-z]{4}")
 _VALID_BITS = {0: {1, 2, 4, 8, 16}, 2: {8, 16}, 3: {1, 2, 4, 8}, 4: {8, 16}, 6: {8, 16}}
@@ -130,6 +134,10 @@ class _Scanlines:
         self.row = bytearray()
         self.previous = bytearray()
         self.rows_unfiltered = 0
+        #: Called every _POLL_EVERY bytes of a row so a cancel or a time limit is
+        #: noticed inside a long row, not only between rows.  None means the
+        #: caller did not ask for polling.
+        self.poll = None
         #: Digest of the reconstructed pixel rows, in pass order: the only
         #: externally checkable proof that the filters were reversed.
         self.hasher = hashlib.sha256()
@@ -165,7 +173,10 @@ class _Scanlines:
             out = bytearray(row_bytes)
             previous = self.previous
             bpp = self.bpp
+            poll = self.poll
             for index in range(row_bytes):
+                if poll is not None and index % _POLL_EVERY == 0:
+                    poll()
                 value = raw[index]
                 left = out[index - bpp] if index >= bpp else 0
                 up = previous[index] if index < len(previous) else 0
@@ -307,6 +318,7 @@ def decode_png(stream, *, limits=None, stop=None) -> dict:
                     raise _Halt("undecided", reason)
                 scanlines = _Scanlines(width, height, bits, _CHANNELS[color], interlace,
                                        indexed=(color == 3))
+                scanlines.poll = lambda: _poll(budget, stop)
             elif kind == b"IDAT":
                 if scanlines is None:
                     raise _Halt("failed", "missing_ihdr")

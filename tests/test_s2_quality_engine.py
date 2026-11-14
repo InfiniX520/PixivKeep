@@ -478,6 +478,53 @@ def test_a_stop_between_stages_stops_the_command(tmp_path, monkeypatch):
     assert report["path_stability"] == "unknown"
 
 
+def test_a_cancel_after_the_decode_stops_the_last_stage(tmp_path, monkeypatch):
+    import threading
+
+    path = write(tmp_path, "valid.png", _valid())
+    stop = threading.Event()
+    real = quality_check._decode
+
+    def decode_then_stop(*args, **kwargs):
+        outcome = real(*args, **kwargs)
+        stop.set()
+        return outcome
+
+    monkeypatch.setattr(quality_check, "_decode", decode_then_stop)
+    report = quality_check.check_file(path, decode_policy="strict", stop=stop)
+    assert report["quality"]["decode"]["state"] == "ok"
+    # The version hash after the decode is a stage of its own: a cancel there
+    # leaves the path unproven rather than claiming it did not move.
+    assert report["sha256_after"] is None
+    assert report["path_stability"] == "unknown"
+    assert report["path_stability_reason"] == "hash_not_affordable"
+
+
+def test_a_long_row_is_interrupted_at_a_bounded_number_of_bytes():
+    """A row of a large image is millions of bytes; a stop must not wait for it.
+
+    The decoder polls every _POLL_EVERY bytes, so the work between two checks
+    is bounded by that constant rather than by the image width.
+    """
+    width, height = 200_000, 1
+    rows = rows_of(width, height, lambda x, y: [x & 0xFF], 8)
+    data = encode(rows, width=width, height=height)
+    from core import png_decode as module
+
+    polls = []
+
+    class Stop:
+        def is_set(self):
+            polls.append(True)
+            return False
+
+    result = decode_bytes(data, stop=Stop())
+    assert result["state"] == "ok"
+    # One poll per _POLL_EVERY bytes of the row (plus the per-chunk polls).
+    assert len(polls) >= width // module._POLL_EVERY
+    assert width // len(polls) <= 2 * module._POLL_EVERY
+
+
 def test_a_cancelled_decode_is_undecided_and_measures_nothing(tmp_path):
     width = height = 64
     rows = rows_of(width, height, lambda x, y: [(x + y) & 0xFF], 8)
