@@ -80,7 +80,7 @@ def test_the_three_dimensions_stay_independent():
             # Nothing was saved, yet the walk itself finished and the filter
             # still met unknown fields: three different answers at once.
             artists=[artist("a-1", pages=0)],
-            totals={"unknown_fields": 2, "pages_saved": 0},
+            totals={"unknown_fields": 2, "pages_saved": 0, "works_seen": 5, "excluded_by_filter": 2},
         )
     )
     # The filter met unknown fields while the walk and the delivery finished.
@@ -106,9 +106,37 @@ def test_with_no_filter_facts_the_decision_is_skipped_not_applied():
     assert states["decision"] == {"state": "skipped", "reason": "no_filter_facts"}
 
 
-def test_nothing_saved_is_missing_delivery():
-    states = coverage_states(facts(artists=[artist("a-1", pages=0)], totals={"pages_saved": 0}))
-    assert states["delivery"] == {"state": "missing", "reason": "nothing_saved"}
+def test_a_scope_where_everything_was_filtered_out_is_complete_delivery():
+    states = coverage_states(
+        facts(artists=[artist("a-1", pages=0)], totals={"works_seen": 4, "excluded_by_filter": 4, "pages_saved": 0})
+    )
+    # Nothing should have been saved, and nothing was: that is complete, not missing.
+    assert states["delivery"] == {"state": "complete", "reason": None}
+
+
+def test_an_unmeasured_saving_side_is_unknown_not_complete():
+    states = coverage_states(facts(artists=[artist("a-1")], totals={}))
+    assert states["delivery"] == {"state": "unknown", "reason": "saving_not_measured"}
+
+
+def test_pages_that_should_have_been_saved_but_were_not_are_missing():
+    states = coverage_states(
+        facts(artists=[artist("a-1")], totals={"works_seen": 30, "excluded_by_filter": 10, "pages_saved": 0})
+    )
+    assert states["delivery"] == {"state": "missing", "reason": "pages_not_saved:20"}
+
+
+def test_a_partial_saving_shortfall_is_partial_and_names_the_count():
+    states = coverage_states(
+        facts(artists=[artist("a-1")], totals={"works_seen": 30, "excluded_by_filter": 10, "pages_saved": 12})
+    )
+    assert states["delivery"] == {"state": "partial", "reason": "pages_not_saved:8"}
+
+
+def test_a_known_gap_outranks_the_unmeasured_saving_side():
+    states = coverage_states(facts(artists=[artist("a-1", state="pending", pages=0)], totals={}))
+    assert states["delivery"]["state"] == "partial"
+    assert states["delivery"]["reason"] == "artist_pending:a-1"
 
 
 def test_an_unfinished_run_cannot_claim_complete_delivery():
