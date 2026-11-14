@@ -165,10 +165,58 @@ def test_an_empty_candidate_list_returns_empty_buckets():
 
 # --- input discipline -----------------------------------------------------
 
-def test_a_duplicate_illust_id_is_refused():
+def test_an_identical_repeat_is_deduped_and_counted():
     explain = scripted({"a": ("match", "match")})
-    with pytest.raises(ValueError, match="duplicate illust_id"):
-        reevaluate([Artwork("a"), Artwork("a")], OLD, NEW, explain=explain)
+    result = reevaluate([Artwork("a"), Artwork("a")], OLD, NEW, explain=explain)
+    assert result["kept"] == ["a"]
+    assert result["duplicates"] == {"a": 2}
+
+
+def test_three_identical_repeats_count_three_occurrences():
+    explain = scripted({"a": ("match", "match")})
+    result = reevaluate([Artwork("a"), Artwork("a"), Artwork("a")], OLD, NEW, explain=explain)
+    assert result["duplicates"] == {"a": 3}
+    assert result["kept"] == ["a"]
+
+
+def test_repeats_that_disagree_are_refused_and_name_the_field():
+    explain = scripted({"a": ("match", "match")})
+    with pytest.raises(ValueError, match="different content") as caught:
+        reevaluate(
+            [Artwork("a", bookmarks=5), Artwork("a", bookmarks=500)], OLD, NEW, explain=explain
+        )
+    message = str(caught.value)
+    assert "bookmarks" in message
+    assert "positions 1 and 2" in message
+
+
+def test_a_conflict_outside_bookmarks_is_refused_too():
+    """All fields are compared, not just the one the filter happens to read."""
+    explain = scripted({"a": ("match", "match")})
+    first = {"illust_id": "a", "title": "snow", "bookmarks": 5}
+    second = {"illust_id": "a", "title": "rain", "bookmarks": 5}
+    with pytest.raises(ValueError, match="title"):
+        reevaluate([first, second], OLD, NEW, explain=explain)
+
+
+def test_a_list_without_repeats_reports_no_duplicates():
+    explain = scripted({"a": ("match", "match"), "b": ("match", "match")})
+    assert reevaluate([Artwork("a"), Artwork("b")], OLD, NEW, explain=explain)["duplicates"] == {}
+
+
+def test_deduping_does_not_change_the_buckets():
+    table = {"a": ("exclude", "match"), "b": ("match", "exclude")}
+    plain = run(table, ["a", "b"])
+    repeated = run(table, ["a", "b", "a", "b"])
+    assert {name: plain[name] for name in BUCKETS} == {name: repeated[name] for name in BUCKETS}
+    assert repeated["duplicates"] == {"a": 2, "b": 2}
+
+
+def test_the_bucket_sum_counts_unique_candidates_not_raw_rows():
+    table = {"a": ("match", "match"), "b": ("exclude", "exclude")}
+    result = run(table, ["a", "b", "b"])
+    assert sum(len(result[name]) for name in BUCKETS) == 2
+    assert result["duplicates"] == {"b": 2}
 
 
 @pytest.mark.parametrize("bad", [None, "", "   ", 123])

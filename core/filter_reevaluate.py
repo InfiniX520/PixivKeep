@@ -34,6 +34,7 @@ imported lazily from `core.filter_explain`), so this module only classifies.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 from typing import Any, Callable, Iterable, Mapping
 
@@ -107,6 +108,37 @@ def _judge(explain: Explain, candidate: object, conditions: object, *, side: str
     return str(verdict), _reasons(result.get("reasons"), side=side)
 
 
+def _fields(candidate: object) -> dict[str, Any]:
+    """Every field of one candidate as a plain mapping, for conflict checks.
+
+    Dataclasses, mappings and plain objects all have to be comparable: the
+    duplicate check is about "is this the same artwork record", not about how
+    the caller happened to build it.
+    """
+    if isinstance(candidate, Mapping):
+        return dict(candidate)
+    if dataclasses.is_dataclass(candidate) and not isinstance(candidate, type):
+        return dataclasses.asdict(candidate)
+    state = getattr(candidate, "__dict__", None)
+    if isinstance(state, dict):
+        return dict(state)
+    return {"repr": repr(candidate)}
+
+
+def _content_key(fields: Mapping[str, Any]) -> str:
+    return json.dumps(fields, sort_keys=True, ensure_ascii=False, default=repr)
+
+
+def _differing_fields(left: Mapping[str, Any], right: Mapping[str, Any]) -> list[str]:
+    """Field names whose values disagree, so a refusal can name the culprit."""
+    names = set(left) | set(right)
+    return sorted(
+        name
+        for name in names
+        if _content_key({name: left.get(name)}) != _content_key({name: right.get(name)})
+    )
+
+
 def _reason_key(reason: Mapping[str, Any]) -> str:
     """A stable key so the same reason from both sides is not listed twice."""
     return json.dumps(reason, sort_keys=True, ensure_ascii=False, default=str)
@@ -125,10 +157,20 @@ def reevaluate(
     only read.  `old_conditions` / `new_conditions` are `FilterSpec` objects or
     same-shaped mappings and are handed to the explainer untouched.
 
-    Returns the five buckets plus `uncovered_reasons` (one entry per uncovered
-    `illust_id`, holding the de-duplicated reasons from both sides).  Every
-    bucket is sorted ascending by `illust_id`; a candidate appears in exactly
-    one bucket, so the five lengths add up to the number of candidates.
+    Returns the five buckets, `uncovered_reasons` (one entry per uncovered
+    `illust_id`, holding the de-duplicated reasons from both sides) and
+    `duplicates` (one entry per `illust_id` that occurred more than once, holding
+    its total occurrences; the first occurrence counts).
+
+    Every bucket is sorted ascending by `illust_id`, and a candidate appears in
+    exactly one bucket, so **the five lengths add up to the number of unique
+    candidates**.  Repeated candidates are not bucketed twice; callers that need
+    the raw input size can take `len(candidates)` themselves.
+
+    A repeat is only tolerated when it is the same record: two occurrences that
+    disagree on **any** field are refused, because silently keeping the first
+    would let a stale row shadow a fresh one (and the buckets would then describe
+    a candidate nobody actually asked about).
     """
     judge = _default_explain() if explain is None else explain
     if not callable(judge):
@@ -136,18 +178,27 @@ def reevaluate(
 
     buckets: dict[str, list[str]] = {name: [] for name in BUCKETS}
     uncovered_reasons: dict[str, list[dict[str, Any]]] = {}
-    seen: dict[str, int] = {}
-    total = 0
+    seen: dict[str, tuple[int, dict[str, Any]]] = {}
+    duplicates: dict[str, int] = {}
+    position = 0
 
     for candidate in candidates:
-        total += 1
+        position += 1
         illust_id = _illust_id(candidate)
-        if illust_id in seen:
-            raise ValueError(
-                "duplicate illust_id %r at position %d (first at %d)"
-                % (illust_id, total - 1, seen[illust_id])
-            )
-        seen[illust_id] = total - 1
+        fields = _fields(candidate)
+        first = seen.get(illust_id)
+        if first is not None:
+            first_position, first_fields = first
+            differing = _differing_fields(first_fields, fields)
+            if differing:
+                raise ValueError(
+                    "illust_id %r appears twice with different content "
+                    "(positions %d and %d; fields: %s)"
+                    % (illust_id, first_position, position, ", ".join(differing))
+                )
+            duplicates[illust_id] = duplicates.get(illust_id, 1) + 1
+            continue
+        seen[illust_id] = (position, fields)
 
         old_verdict, old_reasons = _judge(judge, candidate, old_conditions, side="old")
         new_verdict, new_reasons = _judge(judge, candidate, new_conditions, side="new")
@@ -176,4 +227,5 @@ def reevaluate(
     result["uncovered_reasons"] = {
         key: uncovered_reasons[key] for key in sorted(uncovered_reasons)
     }
+    result["duplicates"] = {key: duplicates[key] for key in sorted(duplicates)}
     return result
