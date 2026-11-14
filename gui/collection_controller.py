@@ -176,6 +176,11 @@ class CollectionController:
         # epoch or another batch is dropped instead of being shown under the
         # new selection, and a running pass keeps the batch it started with.
         self._verification_epoch = 0
+        # A query generation is orthogonal to the batch epoch: the same batch,
+        # the same cursor and the same selection can be read twice (a refresh),
+        # and the first read's answer must not become the second read's page.
+        self._verification_generation = 0
+        self._verify_requests = {}
         self._verification_batch = None
         self._verify_pass_epoch = None
         self._verify_pass_batch = None
@@ -261,7 +266,8 @@ class CollectionController:
                     if verify:
                         self._verification_failed(error)
                     elif read_failed:
-                        self._verification_read_failed(error, key)
+                        self._verification_read_failed(
+                            error, key, scope=self._verify_requests.get(key))
                 if key in self._busy:
                     self._busy.discard(key); self.view.configure_action(key, enabled=True)
                 if key in {'verify_account','start_preferences','source_preferences'}:
@@ -744,6 +750,8 @@ class CollectionController:
         "already in flight".
         """
         self._verification_epoch += 1
+        self._verification_generation += 1
+        self._verify_requests = {}
         self._verification_batch = None
         for key in ('verification_pages', 'verification_summary'):
             # Drop the watcher, never cancel the producer: a cancelled future
@@ -772,9 +780,17 @@ class CollectionController:
             self._verify_stale_remaining += len(self._verify_queue)
             self._verify_queue = []
 
-    def _verification_scope_ok(self, epoch, batch):
-        """True when a finished read still describes what the user is looking at."""
+    def _verification_scope_ok(self, epoch, generation, batch):
+        """True when a finished read still describes what the user is looking at.
+
+        Three independent facts: the selection epoch, the query generation and
+        the batch.  A refresh keeps the selection and the batch but starts a new
+        generation, so only the generation separates the reply the user asked
+        for from the one that was already on its way.
+        """
         if self._closed or self._closing:
+            return False
+        if generation is not None and generation != self._verification_generation:
             return False
         return epoch == self._verification_epoch and batch == self._current_batch
 
@@ -783,6 +799,8 @@ class CollectionController:
         if not isinstance(row, dict):
             return False
         if row.get('_epoch') != self._verification_epoch:
+            return False
+        if row.get('_generation') not in (None, self._verification_generation):
             return False
         if self._current_batch is not None and row.get('_batch') != self._current_batch:
             return False
@@ -806,9 +824,12 @@ class CollectionController:
 
         Both requests run on the shared query owner.  The Tk thread only sees
         finished Futures through _poll, so no widget is ever built or updated
-        from a query thread.  Each request carries the epoch, the batch and the
-        cursor it was issued for, and its callback is dropped when any of them
-        has moved on.
+        from a query thread.  Every call here starts a new query generation and
+        drops the previous watchers, because "open the page again" and "click
+        refresh" must not be answered by a read that was already on its way.
+        Each request carries the epoch, the generation, the batch and the cursor
+        it was issued for; a reply that misses any of them is dropped without
+        touching the page (contract AMD2 section 5).
 
         'reset' means "start from the head": a new selection, a refresh or a
         new batch throws away the visited cursors instead of continuing a walk
@@ -818,40 +839,54 @@ class CollectionController:
         header says so when their read versions differ instead of pretending
         they were one snapshot.
         """
-        if self.runtime is None or self._verify_busy:
+        if self.runtime is None:
             return
+        if self._verify_busy:
+            # A recovery pass owns this page until it ends, and its own re-read
+            # starts the next generation; reading under it would replace the
+            # rows the pass is working from.
+            self.view.set_verification_result('正在核验，请等这一轮结束。', 'warning')
+            return
+        generation = self._verification_generation + 1
+        self._verification_generation = generation
+        for key in ('verification_pages', 'verification_summary'):
+            # Drop the watcher, never cancel the producer: a cancelled future
+            # is not a completion order guarantee, and the generation gate
+            # rejects whatever it eventually returns.
+            self._pending.pop(key, None)
         if reset:
             self._verify_cursors = [None]
             self._verify_cursor = None
-            self._verify_next = None
-            self._verify_scope_total = None
-            self._verify_read_revision = None
-            self._verify_display = []
-            self._verify_rows = {}
-            self._verify_dropped = 0
-            self._verify_truncated = False
+        # Whatever the previous generation put on screen stops being a fact the
+        # moment a new read starts: the rows go before the request does.
+        self._verify_next = None
+        self._verify_scope_total = None
+        self._verify_read_revision = None
+        self._verify_display = []
+        self._verify_rows = {}
+        self._verify_dropped = 0
+        self._verify_truncated = False
         epoch, batch = self._verification_epoch, self._current_batch
         cursor = self._verify_cursor
         self._verification_batch = batch
         self._verify_state = 'loading'
-        # While a read is on its way nothing on screen is a current fact: the
-        # old rows stop being clickable instead of looking like this page.
-        self._verify_display = []
-        self._verify_rows = {}
+        self._verify_error_text = ''
         self._render_verification()
-        if 'verification_summary' not in self._pending:
-            self._watch('verification_summary',
-                self.runtime.verification_summary(batch_id=batch),
-                lambda value: self._verification_summary(value, epoch=epoch, batch=batch))
-        if 'verification_pages' not in self._pending:
-            self._watch('verification_pages',
-                self.runtime.verification_pages(batch_id=batch, after=cursor,
-                    limit=_VERIFY_PAGE_SIZE),
-                lambda value: self._verification_pages(value, epoch=epoch, batch=batch,
-                    cursor=cursor))
+        self._verify_requests['verification_summary'] = (epoch, generation, batch)
+        self._verify_requests['verification_pages'] = (epoch, generation, batch)
+        self._watch('verification_summary',
+            self.runtime.verification_summary(batch_id=batch),
+            lambda value: self._verification_summary(value, epoch=epoch,
+                generation=generation, batch=batch))
+        self._watch('verification_pages',
+            self.runtime.verification_pages(batch_id=batch, after=cursor,
+                limit=_VERIFY_PAGE_SIZE),
+            lambda value: self._verification_pages(value, epoch=epoch,
+                generation=generation, batch=batch, cursor=cursor))
 
-    def _verification_summary(self, value, *, epoch=None, batch=None):
-        if epoch is not None and not self._verification_scope_ok(epoch, batch):
+    def _verification_summary(self, value, *, epoch=None, generation=None, batch=None):
+        if epoch is not None and not self._verification_scope_ok(
+                epoch, generation, batch):
             return
         self._verify_summary = value if isinstance(value, dict) else {}
         revision = self._verify_summary.get('read_revision')
@@ -859,8 +894,10 @@ class CollectionController:
         self._verify_summary_error = None
         self._render_verification()
 
-    def _verification_pages(self, value, *, epoch=None, batch=None, cursor=None):
-        if epoch is not None and not self._verification_scope_ok(epoch, batch):
+    def _verification_pages(self, value, *, epoch=None, generation=None, batch=None,
+            cursor=None):
+        if epoch is not None and not self._verification_scope_ok(
+                epoch, generation, batch):
             return
         if cursor != self._verify_cursor:
             # The answer belongs to a page the user already left.  Showing it
@@ -885,6 +922,8 @@ class CollectionController:
                 continue
             frozen = dict(row)
             frozen['_epoch'] = epoch if epoch is not None else self._verification_epoch
+            frozen['_generation'] = (generation if generation is not None
+                else self._verification_generation)
             frozen['_batch'] = identity
             self._verify_rows[key] = frozen
             display.append({
@@ -985,21 +1024,29 @@ class CollectionController:
             self._verify_cursor = self._verify_cursors.pop()
         self._verify_next = None
         self._verify_error_text = ''
-        old = self._pending.pop('verification_pages', None)
-        if old is not None and not old[0].done():
-            # The producer keeps running; its result is rejected by the cursor
-            # scope check, so nothing has to be stopped to stay correct.
-            old[0].cancel()
+        # The producer keeps running; its result is rejected by the generation
+        # and cursor gates, so nothing has to be stopped to stay correct.
+        self._pending.pop('verification_pages', None)
         self._refresh_verification()
 
-    def _verification_read_failed(self, error, key):
+    def _verification_read_failed(self, error, key, *, scope=None):
         """A failed read is a visible state, not a modal and not an old list.
+
+        The failure belongs to one query generation: a read that was already on
+        its way when the user refreshed must not replace the new page with its
+        own error.  'scope' is the (epoch, generation, batch) it was issued for.
 
         A summary failure leaves the rows alone (they were read by another
         statement and are still true facts) but says so.  A page failure clears
         the rows, the cursor and every action: the user must not be able to
         click a page that the failed read never described.
         """
+        if scope is not None:
+            epoch, generation, batch = scope
+            if not self._verification_scope_ok(epoch, generation, batch):
+                # The page moved on before this read failed; the new read owns
+                # the state, and this error is not a fact about it.
+                return
         text = _ERROR.get(getattr(error, 'code', None)) or (
             '读取待核验页面没有完成。请点“刷新”重试；若持续出现，请查看诊断日志。')
         if key == 'verification_summary':

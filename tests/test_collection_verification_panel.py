@@ -1599,3 +1599,209 @@ def test_controller_labels_a_header_read_from_another_transaction():
     assert "统计与列表不是同一次读取" not in view.named(
         "set_verification_rows")[-1][2]["page_text"]
 
+
+# ----------------------------------------------------------------------
+# AMD2 section 5: one query generation per read (WR-06 remaining)
+# ----------------------------------------------------------------------
+
+
+def _pages_requests(controller):
+    return [item for item in controller.runtime.requests if item[0] == "pages"]
+
+
+def _read_page(rows, *, batch=None, next_cursor=None, total=None, revision=None,
+          truncated=False):
+    stats = {"batch_id": batch}
+    if total is not None:
+        stats["total"] = total
+    payload = {"rows": list(rows), "next_cursor": next_cursor,
+               "truncated": truncated, "stats": stats}
+    if revision is not None:
+        payload["read_revision"] = revision
+    return payload
+
+
+def _open_verify(controller):
+    """Select the fixture job and open the page (two polls settle both reads)."""
+    controller.handle("select_task", {"id": "job-a"})
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(2):
+        controller._poll()
+
+
+def test_controller_drops_a_page_that_was_read_before_the_refresh():
+    controller, view = _queued_controller()
+    _open_verify(controller)
+    first = controller.runtime.pending["pages"][0]
+    assert len(_pages_requests(controller)) == 1
+
+    controller.handle("verification_refresh", {})
+
+    assert len(_pages_requests(controller)) == 2, "a refresh must ask again"
+    _resolve(first, _read_page([_row(batch="batch-a")], batch="batch-a"))
+    for _ in range(3):
+        controller._poll()
+    assert controller._verify_display == []
+    assert controller._verify_rows == {}
+    assert controller._verify_state == "loading"
+    assert view.named("set_verification_rows")[-1][1][0] == []
+
+
+def test_controller_drops_a_reply_stamped_with_an_older_generation():
+    controller, _view = _queued_controller()
+    _open_verify(controller)
+    stale = controller._verification_generation
+    controller.handle("verification_refresh", {})
+    controller._verification_pages(_read_page([_row(batch="batch-a")], batch="batch-a"),
+        epoch=controller._verification_epoch, generation=stale,
+        batch="batch-a", cursor=None)
+    assert controller._verify_display == []
+    assert controller._verify_state == "loading"
+    controller._verification_pages(_read_page([_row(batch="batch-a")], batch="batch-a"),
+        epoch=controller._verification_epoch,
+        generation=controller._verification_generation,
+        batch="batch-a", cursor=None)
+    assert len(controller._verify_display) == 1
+
+
+def test_each_refresh_asks_once_and_never_piles_up():
+    controller, _view = _queued_controller()
+    _open_verify(controller)
+    before = len(_pages_requests(controller))
+    controller.handle("verification_refresh", {})
+    controller.handle("verification_refresh", {})
+    assert len(_pages_requests(controller)) == before + 2
+    assert len(controller.runtime.pending["pages"]) == before + 2
+    live = [key for key in controller._pending
+            if key.startswith('verification_pages')]
+    assert live == ['verification_pages'], controller._pending.keys()
+
+
+def test_page_next_and_previous_each_start_one_new_generation():
+    controller, view = _queued_controller()
+    _open_verify(controller)
+    cursor = ("batch-a", "100", 0, "d-50")
+    _resolve(controller.runtime.pending["pages"][0],
+        _read_page([_row(batch="batch-a")], batch="batch-a", next_cursor=cursor,
+              total=51))
+    for _ in range(2):
+        controller._poll()
+    assert controller._verify_next == cursor
+    assert "本页 1 / 范围内 51" in view.named("set_verification_rows")[-1][2]["page_text"]
+    first = controller._verification_generation
+
+    controller.handle("verification_page_next", {})
+    assert controller._verification_generation == first + 1
+    assert controller._verify_cursor == cursor
+    _resolve(controller.runtime.pending["pages"][-1],
+        _read_page([_row(illust="200", delivery="d-51", batch="batch-a")],
+              batch="batch-a"))
+    for _ in range(2):
+        controller._poll()
+    assert [row["illust_id"] for row in controller._verify_display] == ["200"]
+
+    controller.handle("verification_page_previous", {})
+    assert controller._verification_generation == first + 2
+    assert controller._verify_cursor is None
+    _resolve(controller.runtime.pending["pages"][-1],
+        _read_page([_row(batch="batch-a")], batch="batch-a"))
+    for _ in range(2):
+        controller._poll()
+    assert [row["illust_id"] for row in controller._verify_display] == ["100"]
+
+
+def test_switching_the_job_advances_the_generation_and_drops_the_old_reply():
+    controller, _view = _queued_controller()
+    _open_verify(controller)
+    epoch_before = controller._verification_epoch
+    generation_before = controller._verification_generation
+    stale = controller.runtime.pending["pages"][0]
+    controller.handle("select_task", {"id": "job-b"})
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(2):
+        controller._poll()
+    assert controller._verification_epoch > epoch_before
+    assert controller._verification_generation > generation_before
+    _resolve(stale, _read_page([_row(batch="batch-a")], batch="batch-a"))
+    for _ in range(3):
+        controller._poll()
+    assert controller._verify_display == []
+
+
+def test_leaving_and_reopening_the_page_starts_a_new_generation():
+    controller, view = _queued_controller()
+    _open_verify(controller)
+    generation_before = controller._verification_generation
+    stale = controller.runtime.pending["pages"][0]
+    controller.handle("navigate", {"page": "follow"})
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(2):
+        controller._poll()
+    assert controller._verification_generation > generation_before
+    _resolve(stale, _read_page([_row(batch="batch-a")], batch="batch-a"))
+    for _ in range(3):
+        controller._poll()
+    assert controller._verify_display == []
+    assert view.named("set_verification_rows")[-1][1][0] == []
+
+
+def test_a_refresh_during_a_recovery_pass_does_not_read_or_disturb_it():
+    pending = Future()
+    session = _FakeSession()
+    session.recover_verification_page = lambda *args, **kwargs: pending
+    controller, view, _dialogs = _controller([_row()], _summary({
+        "needs_verification": 1}), session)
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(3):
+        controller._poll()
+    before = len(_pages_requests(controller))
+    controller.handle("verification_recover", {"key": _key()})
+    assert controller._verify_busy is True
+    controller.handle("verification_refresh", {})
+    assert len(_pages_requests(controller)) == before
+    assert controller._verify_busy is True
+    texts = [call[1][0] for call in view.named("set_verification_result")]
+    assert "正在核验，请等这一轮结束。" in texts, texts
+    pending.set_result({"outcome": "reused", "reason": "hash_match",
+                        "illust_id": "100", "page_index": 0})
+    for _ in range(3):
+        controller._poll()
+    assert controller._verify_busy is False
+    assert len(_pages_requests(controller)) == before + 1
+
+
+def test_a_failed_read_is_replaced_by_the_next_generation():
+    controller, _view = _queued_controller()
+    _open_verify(controller)
+    failing = controller.runtime.pending["pages"][0]
+    failing.set_exception(RuntimeError("ledger gone"))
+    for _ in range(3):
+        controller._poll()
+    assert controller._verify_state == "error"
+    assert controller._verify_display == []
+    controller.handle("verification_refresh", {})
+    assert controller._verify_state == "loading"
+    _resolve(controller.runtime.pending["pages"][-1],
+        _read_page([_row(batch="batch-a")], batch="batch-a"))
+    for _ in range(3):
+        controller._poll()
+    assert controller._verify_state == "ready"
+    assert len(controller._verify_display) == 1
+    assert controller._verify_error_text == ""
+
+
+def test_a_failure_from_an_older_generation_does_not_replace_the_page():
+    controller, _view = _queued_controller()
+    _open_verify(controller)
+    stale = controller._verification_generation
+    controller.handle("verification_refresh", {})
+    controller._verification_read_failed(RuntimeError("old failure"),
+        "verification_pages",
+        scope=(controller._verification_epoch, stale, controller._current_batch))
+    assert controller._verify_state == "loading"
+    assert controller._verify_display == []
+    controller._verification_read_failed(RuntimeError("now"),
+        "verification_pages",
+        scope=(controller._verification_epoch,
+               controller._verification_generation, controller._current_batch))
+    assert controller._verify_state == "error"
