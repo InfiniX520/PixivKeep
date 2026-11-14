@@ -28,6 +28,8 @@
 5. 句柄与路径都有效但不一致 → `path_binding=changed`、`identity=changed`；
 6. 三者都有效且一致 → `identity=ok`。
 
+**已知冲突优先于 unknown**：读完时的句柄与路径两侧都可测且不一致 → `path_binding=changed`，即使第一次句柄测量读不到也写 `identity=changed` 并保留 `path_replaced_during_hash`。其余情况下句柄不干净（任一未知或已变）时 `path_binding` 仍记 `unknown`——名字没有被一个可担保的句柄证明；`path_binding=ok` 只出现在句柄全程有效且名字对得上的时候。
+
 **`None` 不同时表示"匹配"和"无证据"**：未知一律是显式字符串 + `identity_reason`。收据里 `identity_state` 只有两侧都带上有效身份且一致时才是 `proven`，否则 `unproven` 并计数。
 
 Windows 上目录枚举缓存（`DirEntry.stat`）的 `st_dev/st_ino/st_nlink` 是 0，而 `os.stat`/`os.fstat` 给出真实值；所以身份只从**打开后的句柄**取，并用 `os.lstat` 复核路径。
