@@ -2322,11 +2322,11 @@
           "before": "15 failed / 2 passed"
         },
         "full_matrix": {
-          "tests": 3316,
+          "tests": 3317,
           "failed": 0,
           "errors": 0,
           "skipped": 4,
-          "seconds": 772.99
+          "seconds": 861.86
         },
         "tk_modules": {
           "view": 25,
@@ -2361,7 +2361,8 @@
           "report": 26,
           "chain": 9,
           "offline_cli": 22
-        }
+        },
+        "total_across_steps": 3387
       },
       "new_findings": [],
       "previous_product_findings_open": [],

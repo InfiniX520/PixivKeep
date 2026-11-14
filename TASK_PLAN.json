@@ -1566,8 +1566,8 @@
           "title": "S5 筛选原因码统一（P3）与界面接线",
           "strategy": "filter_explain 改用 filter_reasons 的构造入口并修 FrozenReason 的 |= 漏洞；覆盖摘要/筛选解释/保存方案的 UI 与 CLI 接线单列",
           "risk": "界面接线会碰 Tk 已知稳定性问题",
-          "status": "待处理",
-          "verify": "待做"
+          "status": "已完成",
+          "verify": "filter_explain 改用 filter_reasons 构造入口并修 |= 漏洞；覆盖摘要与筛选解释已接只读 CLI 与只读界面；E1 五个离线引擎与三个离线命令已实现；真实账号写回仍待用户"
         }
       ]
     }
