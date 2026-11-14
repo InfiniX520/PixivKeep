@@ -1,6 +1,6 @@
 # PixivKeep
 
-**当前状态（2026-11-15，U1/U2 审计修复）**：被审候选 `031627c` 的 **1 P1 + 7 P2 已全部修复**，审计的 17 项独立反例从 **15 红 / 2 绿** 变为 **17/17 全绿**；现有套件 **3,095 通过 / 4 跳过**（另有两个已登记的环境 flake：Tk 初始化、log-view 10 ms 刷盘竞态）。
+**当前状态（2026-11-15，U1/U2 审计修复）**：被审候选 `031627c` 的 **1 P1 + 7 P2 已全部修复**，审计的 17 项独立反例从 **15 红 / 2 绿** 变为 **17/17 全绿**；现有套件 **3,099 通过 / 4 跳过**（另有两个已登记的环境 flake：Tk 初始化、log-view 10 ms 刷盘竞态）。
 修复分支 `fix/a1-u1u2-audit-20261115`，日常仍为 `4ba891e`，**未部署**；E1-3/E1-4 与覆盖摘要/筛选解释的界面接线尚未开始。
 先读[本轮审计](.runtime/jpgpng_u1u2_audit_20261115_01/review/docs/audits/2026-11-15-u1u2-independent/FINDINGS.md)、[开发指导](.runtime/jpgpng_u1u2_audit_20261115_01/review/docs/audits/2026-11-15-u1u2-independent/DEVELOPMENT_GUIDE.md)与[四个契约](docs/optimization/2026-11-15/FIX_CONTRACTS.md)。
 

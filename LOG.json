@@ -2322,17 +2322,17 @@
           "before": "15 failed / 2 passed"
         },
         "full_matrix": {
-          "tests": 3095,
+          "tests": 3099,
           "failed": 0,
           "errors": 0,
           "skipped": 4,
-          "seconds": 695.38
+          "seconds": 626.56
         },
         "tk_modules": {
           "view": 25,
           "collection": 4,
           "source": 5,
-          "note": "one setup-only Tcl error was retried and recorded"
+          "note": "no retry needed on the final run"
         },
         "independent_reaudit": {
           "range": "031627c..e54eeb9",
@@ -2342,6 +2342,11 @@
           "verdict": "no P1 in code; one P2 (this file claimed a passed audit it had not had) and two P3",
           "baseline_untouched": true,
           "rerun": "127 tests, 0 failed"
+        },
+        "boundaries": {
+          "closure": 14,
+          "boundaries": 10,
+          "w5w6": 12
         }
       },
       "new_findings": [],
