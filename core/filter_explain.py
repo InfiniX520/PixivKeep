@@ -3,11 +3,20 @@
 `core.candidate_filter.evaluate_filters` already decides whether a candidate is
 allowed, filtered or unknown.  This module only turns that decision into a
 closed vocabulary so a page, a report or a log can say *why* a work was left
-out, and it keeps the three states one-to-one with the existing ones:
+out.  The table below translates *the filtering part only* - the answer
+``evaluate_filters`` gave - and :func:`explain` uses it as a live cross-check:
+if the reasons derived from that answer ever disagree with its own state, the
+two translations have drifted and the call is refused instead of returning a
+wrong verdict.
 
-    match   <-> allow             no known and no unknown reason
-    exclude <-> filtered          at least one known reason
-    unknown <-> metadata_unknown  no known reason, at least one unknown one
+    allow            -> match     (no reason came back)
+    filtered         -> exclude   (at least one known reason came back)
+    metadata_unknown -> unknown   (only unknown reasons came back)
+
+The verdict of the whole call is then computed from *all* reasons, including
+the two facts this module adds (anime type, availability), so it is not simply
+the filtering state renamed: a work can be ``allow`` for the filters and still
+be excluded for being unsupported.
 
 Two facts that `evaluate_filters` does not look at are added here, because they
 are part of the same user question: an unsupported anime work (`kind == "ugoira"`)
@@ -59,8 +68,9 @@ LEGACY_CODE_MAP = {
     "invalid_original_metadata": ("field_unknown", "original_urls", True),
 }
 
-#: FilterEvaluation state -> verdict.  Kept public so tests (and the matrix in
-#: the integration step) can check that the mapping is the only translation.
+#: FilterEvaluation state -> the verdict its own reasons must produce.  This is
+#: checked on every call (see :func:`explain`), so the table cannot drift away
+#: from the behaviour it documents.
 STATE_MAP = {"allow": "match", "filtered": "exclude", "metadata_unknown": "unknown"}
 
 _KNOWN_KINDS = ("illust", "manga", "ugoira")
@@ -119,6 +129,15 @@ def _availability(candidate: object) -> object:
     raise ValueError("invalid_candidate: availability must be bool or None")
 
 
+def _verdict(reasons: list[dict]) -> str:
+    """One verdict from reason records; a known reason always wins."""
+    if any(item["unknown"] is False for item in reasons):
+        return "exclude"
+    if any(item["unknown"] is True for item in reasons):
+        return "unknown"
+    return "match"
+
+
 def explain(candidate: object, conditions: object) -> dict:
     """Explain one candidate under one set of conditions.
 
@@ -139,7 +158,7 @@ def explain(candidate: object, conditions: object) -> dict:
     availability = _availability(candidate)
 
     evaluation = evaluate_filters(spec, bookmarks=bookmarks, ai_flag=ai_flag)
-    reasons: list[dict] = []
+    filter_reasons: list[dict] = []
     for legacy in evaluation.reasons:
         mapped = LEGACY_CODE_MAP.get(legacy)
         if mapped is None:
@@ -150,7 +169,21 @@ def explain(candidate: object, conditions: object) -> dict:
         evidence = bookmarks if code == "favorites_below" else (
             True if code == "ai_excluded" else None
         )
-        reasons.append(_reason(code, field, evidence, unknown=unknown))
+        filter_reasons.append(_reason(code, field, evidence, unknown=unknown))
+
+    expected = STATE_MAP.get(evaluation.state)
+    if expected is None:
+        raise ValueError("unknown_filter_state: %r" % (evaluation.state,))
+    produced = _verdict(filter_reasons)
+    if produced != expected:
+        # The mapping is not decoration: a disagreement means the codes derived
+        # above no longer describe the state evaluate_filters reported, and a
+        # caller would get a verdict nobody can explain.
+        raise ValueError(
+            "filter_state_mismatch: state=%r reasons=%r" % (evaluation.state, produced)
+        )
+
+    reasons = list(filter_reasons)
 
     kind = _kind(candidate)
     if kind == "ugoira":
@@ -161,12 +194,4 @@ def explain(candidate: object, conditions: object) -> dict:
     if availability is False:
         reasons.append(_reason("access_denied", "availability", False))
 
-    known = [item for item in reasons if not item["unknown"]]
-    unknown_reasons = [item for item in reasons if item["unknown"]]
-    if known:
-        verdict = "exclude"
-    elif unknown_reasons:
-        verdict = "unknown"
-    else:
-        verdict = "match"
-    return {"verdict": verdict, "reasons": reasons}
+    return {"verdict": _verdict(reasons), "reasons": reasons}

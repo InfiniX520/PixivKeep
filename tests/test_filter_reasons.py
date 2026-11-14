@@ -8,22 +8,37 @@ import pytest
 from core import filter_reasons as fr
 
 
-def test_the_closed_sets_keep_the_documented_order():
-    assert fr.REASON_CODES == (
-        "favorites_below",
-        "ai_excluded",
-        "type_unsupported",
-        "field_unknown",
-        "access_denied",
-    )
-    assert fr.FIELDS == (
-        "bookmarks",
-        "ai_flag",
-        "type",
-        "availability",
-        "original_urls",
-    )
+def test_a_reason_outside_the_vocabulary_is_refused():
+    # Behaviour, not a copy of the tuples: the closed set is checked by trying
+    # to step outside it.
+    with pytest.raises(fr.FilterReasonError):
+        fr.reason("not_a_reason", "bookmarks", 1)
+    with pytest.raises(fr.FilterReasonError):
+        fr.reason("favorites_below", "not_a_field", 1)
 
+
+def test_each_documented_legacy_code_translates_to_its_documented_reason():
+    # The expectations below are the documented mapping, written out here so a
+    # changed table cannot silently agree with itself.
+    expected = {
+        "bookmarks_below_minimum": ("favorites_below", "bookmarks", False),
+        "bookmarks_unknown": ("field_unknown", "bookmarks", True),
+        "ai_excluded": ("ai_excluded", "ai_flag", False),
+        "ai_flag_unknown": ("field_unknown", "ai_flag", True),
+        "ugoira_unsupported": ("type_unsupported", "type", False),
+        "artwork_unavailable": ("access_denied", "availability", False),
+        "original_metadata_unknown": ("field_unknown", "original_urls", True),
+        "invalid_original_metadata": ("field_unknown", "original_urls", True),
+    }
+    for legacy, triple in expected.items():
+        record = fr.translate(legacy)
+        assert (record["code"], record["field"], record["unknown"]) == triple, legacy
+        assert record["evidence"] == legacy, legacy
+
+
+def test_an_unknown_legacy_code_is_refused():
+    with pytest.raises(fr.FilterReasonError):
+        fr.translate("mystery_code")
 
 def test_a_reason_is_immutable_and_still_serialises_as_json():
     record = fr.reason("favorites_below", "bookmarks", 12)

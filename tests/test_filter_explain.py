@@ -15,10 +15,7 @@ import pytest
 from core.candidate_filter import ArtworkMetadata
 from core.filter_explain import (
     FIELDS,
-    LEGACY_CODE_MAP,
     REASON_CODES,
-    STATE_MAP,
-    VERDICTS,
     explain,
 )
 from core.task_contracts import FilterSpec
@@ -191,30 +188,63 @@ def test_every_reason_uses_the_closed_sets_and_a_scalar_evidence():
         assert item["evidence"] is None or isinstance(item["evidence"], (str, int, bool))
 
 
-def test_the_state_map_is_the_only_translation():
-    assert STATE_MAP == {"allow": "match", "filtered": "exclude", "metadata_unknown": "unknown"}
-    assert tuple(STATE_MAP.values()) == VERDICTS
+def test_the_filtering_state_and_the_reasons_must_agree(monkeypatch):
+    # A state that disagrees with its own reasons would mean the table and the
+    # behaviour have drifted; explain() refuses instead of guessing.
+    from core import filter_explain
+
+    monkeypatch.setattr(
+        filter_explain,
+        "evaluate_filters",
+        lambda *args, **kwargs: SimpleNamespace(
+            state="allow", reasons=("bookmarks_below_minimum",)
+        ),
+    )
+    with pytest.raises(ValueError) as caught:
+        explain(candidate(bookmarks=1), {"min_bookmarks": 10})
+    assert "filter_state_mismatch" in str(caught.value)
 
 
-def test_every_legacy_code_known_to_the_filter_module_is_mapped():
-    from core import candidate_filter
+def test_a_filtering_state_with_only_unknown_reasons_is_unknown(monkeypatch):
+    from core import filter_explain
 
-    source = inspect.getsource(candidate_filter)
-    legacy = {
-        name
-        for name in LEGACY_CODE_MAP
-        if name in source
-    }
-    # The four codes evaluate_filters can emit must all be present.
-    for name in (
-        "bookmarks_below_minimum",
-        "bookmarks_unknown",
-        "ai_excluded",
-        "ai_flag_unknown",
-    ):
-        assert name in legacy
-        assert LEGACY_CODE_MAP[name][0] in REASON_CODES
+    monkeypatch.setattr(
+        filter_explain,
+        "evaluate_filters",
+        lambda *args, **kwargs: SimpleNamespace(
+            state="metadata_unknown", reasons=("bookmarks_unknown",)
+        ),
+    )
+    result = explain(candidate(bookmarks=None), {"min_bookmarks": 10})
+    assert result["verdict"] == "unknown"
 
+
+def test_an_unknown_filtering_state_is_refused(monkeypatch):
+    from core import filter_explain
+
+    monkeypatch.setattr(
+        filter_explain,
+        "evaluate_filters",
+        lambda *args, **kwargs: SimpleNamespace(state="exploded", reasons=()),
+    )
+    with pytest.raises(ValueError) as caught:
+        explain(candidate(), {})
+    assert "unknown_filter_state" in str(caught.value)
+
+def test_each_filter_rejection_becomes_the_documented_reason():
+    # Expected triples are written out here, from the documented table, not read
+    # back from the module: a copy of the implementation would only detect edits.
+    cases = [
+        (candidate(bookmarks=1), {"min_bookmarks": 10}, ("favorites_below", "bookmarks", False)),
+        (candidate(bookmarks=None), {"min_bookmarks": 10}, ("field_unknown", "bookmarks", True)),
+        (candidate(ai_flag=True), {"exclude_ai": True}, ("ai_excluded", "ai_flag", False)),
+        (candidate(ai_flag=None), {"exclude_ai": True}, ("field_unknown", "ai_flag", True)),
+    ]
+    for work, conditions, expected in cases:
+        result = explain(work, conditions)
+        assert len(result["reasons"]) == 1, (work, expected)
+        reason = result["reasons"][0]
+        assert (reason["code"], reason["field"], reason["unknown"]) == expected
 
 def test_an_unmapped_legacy_code_is_a_contract_break(monkeypatch):
     from core import filter_explain

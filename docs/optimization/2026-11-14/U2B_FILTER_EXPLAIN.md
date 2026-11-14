@@ -48,7 +48,13 @@
 
 ## 3. 三态与五桶
 
-`explain` 的三态映射写死为一张表：`allow→match`、`filtered→exclude`、`metadata_unknown→unknown`。
+`explain` 里那张表（`allow→match`、`filtered→exclude`、`metadata_unknown→unknown`）**只翻译筛选那一段**，不是整个 verdict 的定义。
+
+它每次调用都会被真正用到：`explain` 用 `evaluate_filters` 返回的 `state` 查出期望 verdict，再用自己从原因推导出的 verdict 与它比对；**不一致就抛 `ValueError("filter_state_mismatch")`**，因为那说明两套翻译已经漂移，调用方会拿到一个解释不了的结论。所以这张表不是文档装饰，是本模块的内部不变量。
+
+总 verdict 由**全部原因**共同决定（筛选原因 + 本模块补的 `type_unsupported` / `access_denied`），因此它不等于 `evaluate_filters` 三态的重命名：
+
+> 一个 `kind="ugoira"` 的作品在筛选条件为空时 `evaluate_filters` 返回 `allow`，但 `explain` 的总 verdict 是 `exclude`（类型不支持）。这正是两者不能混为一谈的例子。
 
 `reevaluate` 的规则是**新判定决定桶，旧判定只用来细分**：
 
