@@ -73,13 +73,37 @@ def _text(value: object) -> str:
     return "" if value is None else str(value)
 
 
+def _aliased(row: object, names: tuple, *, what: str) -> object:
+    """Read one fact that may arrive under more than one spelling.
+
+    The crawl state says total_artists / pages; the DTO says artists_total /
+    works_seen.  The alias is normalised here, once, at the entry point - and a
+    row that carries both spellings with *different* values is refused, because
+    two answers to one question is a caller bug rather than something to guess.
+    """
+    found = []
+    for name in names:
+        value = _field(row, name)
+        if value is not None:
+            found.append((name, value))
+    if not found:
+        return None
+    first_name, first = found[0]
+    for name, value in found[1:]:
+        if value != first:
+            raise ValueError(
+                "%s carries both %s=%r and %s=%r" % (what, first_name, first, name, value)
+            )
+    return first
+
+
 def _run_facts(row: object) -> dict[str, Any]:
     if row is None:
         raise TypeError("facts source returned no run")
     for name in ("run_id", "status"):
         if _field(row, name) is None:
             raise TypeError("run row has no %r" % (name,))
-    total = _field(row, "total_artists")
+    total = _aliased(row, ("artists_total", "total_artists"), what="run row")
     return {
         "run_id": _text(_field(row, "run_id")),
         "account_ref": _text(_field(row, "account_id")),
@@ -94,11 +118,14 @@ def _artist_facts(row: object) -> dict[str, Any]:
     artist_id = _field(row, "artist_id")
     if artist_id is None:
         raise TypeError("artist row has no artist_id")
-    works = _field(row, "works_seen")
+    # The DTO word is works_seen: the number is *works* that artist produced,
+    # not image pages.  "pages" is the old crawl-state spelling and is accepted
+    # as an alias here only (a row carrying both, disagreeing, is refused).
+    works = _aliased(row, ("works_seen", "pages"), what="artist row %r" % (artist_id,))
     return {
         "artist_id": _text(artist_id),
         "state": _text(_field(row, "state")),
-        "pages": None if works is None else int(works),
+        "works_seen": None if works is None else int(works),
         "newest_illust_id": _text(_field(row, "newest_illust_id")),
         # Passed through verbatim: empty string means "no sweep evidence in
         # this run", and interpreting that is the summariser's job, not ours.
@@ -131,8 +158,23 @@ def _budget_facts(value: object) -> dict[str, Any] | None:
     }
 
 
+def _page_facts(value: object) -> dict[str, Any] | None:
+    """Page-level delivery evidence, copied verbatim when a source has it.
+
+    Deliberately *not* interpreted here (counting and de-duplication belong to
+    the counters module), and deliberately optional: the crawl state store does
+    not carry it, so a summary built from crawl facts alone has no page evidence
+    and must say so instead of claiming the saving side is complete.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise TypeError("pages evidence must be a mapping or None")
+    return dict(value)
+
+
 def gather_facts(source: object) -> dict[str, Any]:
-    """Copy the run, artist, incomplete and budget facts out of one source."""
+    """Copy the run, artist, page, incomplete and budget facts out of one source."""
     run = _run_facts(_member(source, "run"))
     artists = [
         _artist_facts(row)
@@ -141,7 +183,14 @@ def gather_facts(source: object) -> dict[str, Any]:
     artists.sort(key=lambda item: item["artist_id"])
     incomplete = _incomplete_facts(_optional(source, "incomplete_artists", run["run_id"]))
     budget = _budget_facts(_optional(source, "source_budget_status", run["run_id"]))
-    return {"run": run, "artists": artists, "incomplete": incomplete, "budget": budget}
+    pages = _page_facts(_optional(source, "pages", run["run_id"]))
+    return {
+        "run": run,
+        "artists": artists,
+        "pages": pages,
+        "incomplete": incomplete,
+        "budget": budget,
+    }
 
 
 class StateSource:
@@ -153,11 +202,12 @@ class StateSource:
     it only ever calls their getters.
     """
 
-    def __init__(self, repository, run_id, *, incomplete=None, budget=None):
+    def __init__(self, repository, run_id, *, incomplete=None, budget=None, pages=None):
         self._repository = repository
         self._run_id = str(run_id)
         self._incomplete = incomplete
         self._budget = budget
+        self._pages = pages
 
     @property
     def run(self):
@@ -175,3 +225,11 @@ class StateSource:
         if callable(self._budget):
             return self._budget(run_id)
         return self._budget
+
+    def pages(self, run_id):
+        # Page-level delivery evidence (expected page set + per-page content
+        # versions).  The crawl state store has none, so the default is None and
+        # the summary stays honest about the saving side.
+        if callable(self._pages):
+            return self._pages(run_id)
+        return self._pages

@@ -16,13 +16,16 @@ import pytest
 from core.follow_coverage_counts import (
     ARTIST_COUNT_KEYS,
     COUNT_KEYS,
-    RUN_COUNT_KEYS,
+    PAGE_COUNT_KEYS,
+    RAW_COUNT_KEYS,
+    WORK_COUNT_KEYS,
     coverage_counts,
 )
 
 
-def one(artist_id, state, pages=0):
-    return {"artist_id": artist_id, "state": state, "pages": pages, "newest_illust_id": ""}
+def one(artist_id, state, seen=0):
+    """One artist row. The number is *works seen*, never image pages."""
+    return {"artist_id": artist_id, "state": state, "works_seen": seen, "newest_illust_id": ""}
 
 
 def facts(artists, *, totals=None, status="running"):
@@ -97,7 +100,7 @@ def test_the_bucket_identity_is_checked():
 def test_works_seen_is_summed_only_when_the_list_is_proven_complete():
     report = coverage_counts(
         facts(
-            [one("a", "completed", pages=30), one("b", "empty", pages=12)],
+            [one("a", "completed", seen=30), one("b", "empty", seen=12)],
             totals={"total_artists": 2},
         )
     )
@@ -110,14 +113,14 @@ def test_works_seen_is_summed_only_when_the_list_is_proven_complete():
 
 def test_works_seen_stays_unknown_when_the_list_may_be_a_page():
     report = coverage_counts(
-        facts([one("a", "completed", pages=30)], totals={"total_artists": 9})
+        facts([one("a", "completed", seen=30)], totals={"total_artists": 9})
     )
     assert report["counts"]["artworks_seen"] is None
     assert "artworks_seen_unknown:artist_list_not_proven_complete" in report["reasons"]
 
 
 def test_works_seen_stays_unknown_without_a_declared_total():
-    report = coverage_counts(facts([one("a", "completed", pages=30)]))
+    report = coverage_counts(facts([one("a", "completed", seen=30)]))
     assert report["counts"]["artworks_seen"] is None
     assert "artworks_seen_unknown:artist_list_not_proven_complete" in report["reasons"]
 
@@ -125,7 +128,7 @@ def test_works_seen_stays_unknown_without_a_declared_total():
 def test_works_seen_stays_unknown_when_a_page_count_is_missing():
     report = coverage_counts(
         facts(
-            [one("a", "completed", pages=30),
+            [one("a", "completed", seen=30),
              {"artist_id": "b", "state": "completed", "pages": None}],
             totals={"total_artists": 2},
         )
@@ -136,7 +139,7 @@ def test_works_seen_stays_unknown_when_a_page_count_is_missing():
 
 def test_a_declared_works_seen_beats_the_sum_even_when_they_differ():
     report = coverage_counts(
-        facts([one("a", "completed", pages=30)], totals={"total_artists": 1, "works_seen": 99})
+        facts([one("a", "completed", seen=30)], totals={"total_artists": 1, "works_seen": 99})
     )
     assert report["counts"]["artworks_seen"] == 99
     assert "artworks_seen_from_artist_sum" not in report["reasons"]
@@ -144,7 +147,7 @@ def test_a_declared_works_seen_beats_the_sum_even_when_they_differ():
 
 def test_a_negative_declared_works_seen_falls_back_to_the_provable_sum():
     report = coverage_counts(
-        facts([one("a", "completed", pages=7)], totals={"total_artists": 1, "works_seen": -5})
+        facts([one("a", "completed", seen=7)], totals={"total_artists": 1, "works_seen": -5})
     )
     assert report["counts"]["artworks_seen"] == 7
     assert "artworks_seen_from_artist_sum" in report["reasons"]
@@ -155,11 +158,14 @@ def test_a_negative_declared_works_seen_falls_back_to_the_provable_sum():
 
 def test_the_other_run_level_numbers_are_never_derived():
     report = coverage_counts(
-        facts([one("a", "completed", pages=99)], totals={"total_artists": 1})
+        facts([one("a", "completed", seen=99)], totals={"total_artists": 1})
     )
     derived_from_nothing = (
         "pages_saved",
         "pages_already_verified",
+        "pages_saved_new",
+        "pages_failed",
+        "pages_pending_verify",
         "excluded_by_filter",
         "unknown_fields",
         "duplicate_pages",
@@ -169,13 +175,19 @@ def test_the_other_run_level_numbers_are_never_derived():
         assert "not_measured:" + key in report["reasons"], key
 
 
-def test_the_six_run_level_keys_are_passed_through_untouched():
+def test_the_run_level_keys_are_passed_through_untouched():
     totals = complete_totals(1)
     report = coverage_counts(facts([one("a", "completed")], totals=totals))
     # The report word and the storage word differ for exactly one key.
     source = {"artworks_seen": "works_seen"}
-    for key in RUN_COUNT_KEYS:
+    passed = ("artworks_seen", "excluded_by_filter", "pages_saved",
+              "pages_already_verified", "duplicate_pages", "unknown_fields")
+    for key in passed:
         assert report["counts"][key] == totals[source.get(key, key)], key
+    # Derived, never passed through: a work count minus a work count.
+    assert report["counts"]["works_deliverable"] == totals["works_seen"] - totals["excluded_by_filter"]
+    # No source declares it, so it stays unknown instead of borrowing another key.
+    assert report["counts"]["works_unknown"] is None
 
 
 # ------------------------------------------------------------- denominators
@@ -192,11 +204,20 @@ def test_a_list_length_is_never_promoted_to_a_denominator():
     assert report["denominators"]["artists_total"] is None
 
 
-def test_a_mismatched_total_artists_keeps_the_declared_number_and_flags_it():
+def test_a_declared_total_below_the_rows_seen_is_a_contradiction():
+    report = coverage_counts(facts([one("a", "completed")], totals={"total_artists": 0}))
+    assert report["denominators"]["artists_total"] == 0
+    assert "total_artists_mismatch:0<1" in report["reasons"]
+    assert report["consistent"] is False
+
+
+def test_a_declared_total_above_the_rows_seen_is_a_partial_enumeration_not_a_crash():
+    # The list may be a page of a larger range; that is a limit of the walk,
+    # not a contradiction between two numbers.
     report = coverage_counts(facts([one("a", "completed")], totals={"total_artists": 9}))
     assert report["denominators"]["artists_total"] == 9
-    assert "total_artists_mismatch:9!=1" in report["reasons"]
-    assert report["consistent"] is False
+    assert report["consistent"] is True
+    assert "total_artists_mismatch" not in " ".join(report["reasons"])
 
 
 def test_artworks_total_is_null_without_a_run_total():
@@ -213,7 +234,7 @@ def test_works_total_is_accepted_as_the_same_declaration():
 
 def test_a_summed_works_seen_never_reaches_the_denominator():
     report = coverage_counts(
-        facts([one("a", "completed", pages=30)], totals={"total_artists": 1})
+        facts([one("a", "completed", seen=30)], totals={"total_artists": 1})
     )
     assert report["counts"]["artworks_seen"] == 30
     assert report["denominators"]["artworks_total"] is None
@@ -222,18 +243,47 @@ def test_a_summed_works_seen_never_reaches_the_denominator():
 # ------------------------------------------------------------- consistency
 
 
-def test_works_seen_must_split_into_saved_and_excluded():
-    bad = complete_totals(1)
-    bad["works_seen"] = 481
-    report = coverage_counts(facts([one("a", "completed")], totals=bad))
+def test_works_and_pages_are_never_treated_as_one_total():
+    """One work can be three pages: 481 works, 173 pages is not a contradiction."""
+    numbers = complete_totals(1)
+    numbers["works_seen"] = 481
+    report = coverage_counts(facts([one("a", "completed")], totals=numbers))
+    assert report["consistent"] is True
+    assert "split" not in " ".join(report["reasons"])
+    assert report["counts"]["artworks_seen"] == 481
+    assert report["counts"]["pages_saved"] == 173
+
+
+def test_one_work_saved_as_three_pages_is_consistent():
+    report = coverage_counts(
+        facts([one("a", "completed", seen=1)],
+              totals={"artists_total": 1, "works_seen": 1, "pages_saved": 3,
+                      "excluded_by_filter": 0, "unknown_fields": 0})
+    )
+    assert report["counts"]["artworks_seen"] == 1
+    assert report["counts"]["pages_saved"] == 3
+    assert report["counts"]["works_deliverable"] == 1
+    assert report["consistent"] is True
+
+
+def test_excluded_works_are_a_work_count_not_a_page_count():
+    report = coverage_counts(
+        facts([one("a", "completed", seen=10)],
+              totals={"artists_total": 1, "works_seen": 10, "excluded_by_filter": 4,
+                      "pages_saved": 12})
+    )
+    assert report["counts"]["works_deliverable"] == 6
+    assert report["counts"]["excluded_by_filter"] == 4
+
+
+def test_excluding_more_works_than_were_seen_is_a_contradiction():
+    report = coverage_counts(
+        facts([one("a", "completed", seen=3)],
+              totals={"artists_total": 1, "works_seen": 3, "excluded_by_filter": 5})
+    )
     assert report["consistent"] is False
-    assert "works_seen_does_not_split:481!=173+307" in report["reasons"]
-
-
-def test_the_split_is_checked_only_when_all_three_are_known():
-    partial = {"total_artists": 1, "works_seen": 10, "pages_saved": 4}
-    report = coverage_counts(facts([one("a", "completed")], totals=partial))
-    assert "works_seen_does_not_split" not in " ".join(report["reasons"])
+    assert "excluded_by_filter_exceeds_works_seen:5>3" in report["reasons"]
+    assert report["counts"]["works_deliverable"] is None
 
 
 def test_duplicate_pages_cannot_exceed_pages_saved():
@@ -266,9 +316,20 @@ def test_a_duplicate_with_two_states_is_a_conflict():
 
 def test_the_report_carries_exactly_the_frozen_keys():
     report = coverage_counts(facts([one("a", "completed")], totals=complete_totals(1)))
-    assert set(report) == {"counts", "denominators", "consistent", "reasons"}
+    assert set(report) == {
+        "counts",
+        "denominators",
+        "consistent",
+        "reasons",
+        "delivery_evidence",
+    }
     assert set(report["counts"]) == set(COUNT_KEYS)
-    assert set(ARTIST_COUNT_KEYS) | set(RUN_COUNT_KEYS) == set(COUNT_KEYS)
+    assert (
+        set(ARTIST_COUNT_KEYS)
+        | set(WORK_COUNT_KEYS)
+        | set(PAGE_COUNT_KEYS)
+        | set(RAW_COUNT_KEYS)
+    ) == set(COUNT_KEYS)
     assert set(report["denominators"]) == {"artists_total", "artworks_total"}
 
 

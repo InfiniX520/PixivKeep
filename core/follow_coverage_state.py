@@ -152,14 +152,12 @@ def _decision(run: Mapping[str, Any], facts: Mapping[str, Any]) -> dict[str, Any
     return {"state": "skipped", "reason": "no_filter_facts"}
 
 
-def _count(value: object) -> int | None:
-    """A usable non-negative count, or None when the fact is not a measurement."""
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        return None
-    return value
-
-
-def _delivery(run: Mapping[str, Any], artists: list[Mapping[str, Any]], facts: Mapping[str, Any]) -> dict[str, Any]:
+def _delivery(
+    run: Mapping[str, Any],
+    artists: list[Mapping[str, Any]],
+    facts: Mapping[str, Any],
+    counts: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     given = _given(facts, "delivery")
     if given is not None:
         return given
@@ -186,36 +184,52 @@ def _delivery(run: Mapping[str, Any], artists: list[Mapping[str, Any]], facts: M
             "state": "partial",
             "reason": "artist_%s:%s" % (_state(unfinished[0].get("state")), unfinished[0].get("artist_id")),
         }
-    totals = _totals(run)
-    saved = _count(totals.get("pages_saved"))
-    if saved is None:
-        # The enumeration may be finished, but "saved" was never measured:
-        # an unmeasured side cannot be reported as a complete delivery.
-        return {"state": "unknown", "reason": "saving_not_measured"}
-    seen = _count(totals.get("works_seen"))
-    if seen is None:
-        # Without the number of works there is no denominator, and a delivery
-        # cannot be called complete against a denominator nobody measured.
-        return {"state": "unknown", "reason": "saving_not_provable:works_seen"}
-    excluded = _count(totals.get("excluded_by_filter"))
-    if excluded is None:
-        return {"state": "unknown", "reason": "saving_not_provable:excluded_by_filter"}
-    expected = max(0, seen - excluded)
-    if expected > saved:
-        short = expected - saved
-        if saved == 0:
-            return {"state": "missing", "reason": "pages_not_saved:%d" % short}
-        return {"state": "partial", "reason": "pages_not_saved:%d" % short}
-    return {"state": "complete", "reason": None}
+    # Completeness is *page* evidence, never a work-minus-page arithmetic: one
+    # work can be three pages, so "works seen minus excluded <= pages saved"
+    # compared two different units and could call an undelivered work finished.
+    # The one formula lives in the counters module; this function only maps its
+    # answer onto the three delivery states.
+    evidence = None
+    if isinstance(counts, Mapping):
+        evidence = counts.get("delivery_evidence")
+    if isinstance(evidence, Mapping):
+        state = str(evidence.get("state") or "")
+        if state == "complete":
+            return {"state": "complete", "reason": None}
+        if state == "incomplete":
+            missing = evidence.get("missing")
+            expected = evidence.get("expected")
+            missing_count = missing if type(missing) is int else 0
+            expected_count = expected if type(expected) is int else 0
+            if missing_count and missing_count == expected_count:
+                return {"state": "missing", "reason": "pages_not_delivered:%d" % missing_count}
+            return {"state": "partial", "reason": "pages_not_delivered:%d" % missing_count}
+        return {
+            "state": "unknown",
+            "reason": str(evidence.get("reason") or "page_evidence_missing:pages_expected"),
+        }
+    return {"state": "unknown", "reason": "page_evidence_missing:pages_expected"}
 
 
-def coverage_states(facts: object) -> dict[str, dict[str, Any]]:
-    """Judge the three states of one walk.  Reads the facts, changes nothing."""
+def coverage_states(
+    facts: object, *, counts: Mapping[str, Any] | None = None
+) -> dict[str, dict[str, Any]]:
+    """Judge the three states of one walk.  Reads the facts, changes nothing.
+
+    counts is the report from core.follow_coverage_counts.  Passing it in keeps
+    one formula for completeness instead of two copies; when it is omitted the
+    counters are computed here, so a caller cannot get a delivery verdict that
+    disagrees with the numbers it was shown.
+    """
     mapping = _mapping(facts, what="facts")
     run = _mapping(mapping.get("run"), what="run")
     artists = _artists(mapping)
+    if counts is None:
+        from core.follow_coverage_counts import coverage_counts
+
+        counts = coverage_counts(mapping)
     return {
         "enumeration": _enumeration(run, artists),
         "decision": _decision(run, mapping),
-        "delivery": _delivery(run, artists, mapping),
+        "delivery": _delivery(run, artists, mapping, counts),
     }

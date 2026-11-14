@@ -67,7 +67,9 @@ def test_the_artist_buckets_always_add_up(scenario):
 def test_every_synthetic_scenario_is_self_consistent(scenario):
     cov = coverage_for(scenario)
     assert cov.consistent is True
-    assert cov.reasons == ()
+    # reasons are provenance notes ("not_measured:x", "page_evidence_missing:y"),
+    # not contradictions: a contradiction would have set consistent=False.
+    assert all(":" in reason for reason in cov.reasons)
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS)
@@ -132,14 +134,15 @@ def test_duplicates_are_counted_but_never_added_to_what_was_saved():
     assert "重复分页 3" in coverage_for("duplicate_pages").text()
 
 
-def test_a_fully_filtered_scenario_saves_nothing_and_is_still_complete():
-    """Everything that was seen was excluded on purpose: nothing is missing."""
+def test_a_fully_filtered_scenario_saves_nothing_but_cannot_prove_delivery():
+    """Everything seen was excluded, but crawl facts carry no page evidence."""
     cov = coverage_for("all_filtered")
     data = cov.as_dict()
     assert data["counts"]["pages_saved"] == 0
     assert data["counts"]["excluded_by_filter"] == data["counts"]["artworks_seen"] == 30
-    assert data["delivery"]["state"] == "complete"
-    assert cov.overall == "complete"
+    assert data["counts"]["works_deliverable"] == 0
+    assert data["delivery"]["state"] == "unknown"
+    assert cov.overall != "complete"
 
 
 def test_an_empty_following_list_has_a_real_zero_denominator():
@@ -155,7 +158,8 @@ def test_missing_private_fields_block_the_decision_and_not_the_saving():
     cov = coverage_for("private_scope_missing")
     data = cov.as_dict()
     assert data["decision"]["state"] == "unknown_fields"
-    assert data["delivery"]["state"] == "complete"
+    # The saving side is unproven (no page evidence), not "complete".
+    assert data["delivery"]["state"] == "unknown"
     assert cov.overall != "complete"
     text = cov.text()
     assert "筛选判定未完成或未应用" in text
@@ -163,10 +167,28 @@ def test_missing_private_fields_block_the_decision_and_not_the_saving():
     assert "没有保存齐" not in text
 
 
-def test_only_the_clean_scenario_reaches_a_complete_overall():
+def test_no_crawl_only_fixture_claims_a_complete_overall():
     overalls = {name: coverage_for(name).overall for name in SCENARIOS}
-    assert overalls["all_complete"] == "complete"
-    assert overalls["partial_failed_pages"] != "complete"
+    # An empty follow list is the one honest "nothing to deliver": the range is
+    # explicitly empty, so "every expected page has evidence" holds vacuously.
+    assert overalls["empty_following"] == "complete"
+    assert coverage_for("empty_following").as_dict()["delivery"]["reason"] == "no_artists"
+    assert all(
+        value != "complete" for name, value in overalls.items() if name != "empty_following"
+    )
+    assert overalls["all_complete"] == "unknown"
+
+
+def test_page_evidence_is_what_turns_the_overall_complete():
+    facts = facts_for("all_complete")
+    facts["pages"] = {
+        "expected": ["w-1#0"],
+        "observed": [{"page_identity": "w-1#0", "state": "saved_new", "content_sha256": "abc"}],
+    }
+    cov = build_coverage(facts, scope=SCOPE)
+    assert cov.as_dict()["delivery"]["state"] == "complete"
+    assert cov.overall == "complete"
+    assert "已查完" in cov.text()
 
 
 def test_the_scope_has_to_say_what_it_covers():
@@ -226,8 +248,8 @@ def test_a_bad_dimension_state_is_refused(monkeypatch):
 
     original = module.coverage_states
 
-    def broken(facts):
-        states = original(facts)
+    def broken(facts, *, counts=None):
+        states = original(facts, counts=counts)
         states["delivery"] = {"state": "probably", "reason": ""}
         return states
 
@@ -265,12 +287,16 @@ def test_an_unmeasured_save_side_is_unknown_and_not_finished():
     assert "保存与核验未得证明" in cov.text()
 
 
-def test_a_saving_shortfall_is_caught_even_when_every_artist_finished():
+def test_a_page_set_shortfall_is_caught_even_when_every_artist_finished():
     facts = facts_for("all_complete")
-    facts["run"]["totals"]["pages_saved"] = 9
+    facts["pages"] = {
+        "expected": ["w-1#0", "w-1#1", "w-1#2"],
+        "observed": [{"page_identity": "w-1#0", "state": "saved_new", "content_sha256": "a"}],
+    }
     cov = build_coverage(facts, scope=SCOPE)
-    assert cov.as_dict()["delivery"]["state"] in ("partial", "missing")
-    assert cov.as_dict()["delivery"]["reason"].startswith("pages_not_saved:")
+    delivery = cov.as_dict()["delivery"]
+    assert delivery["state"] == "partial"
+    assert delivery["reason"] == "pages_not_delivered:2"
     assert cov.overall != "complete"
 
 
@@ -283,17 +309,18 @@ def test_the_works_count_is_summed_only_when_the_list_is_complete():
     assert cov.consistent is True
 
 
-def test_an_incomplete_artist_list_is_not_turned_into_a_denominator():
+def test_a_declared_range_larger_than_the_rows_seen_is_a_partial_walk():
     facts = facts_for("all_complete")
     facts["run"]["totals"]["total_artists"] = 5
+    facts["run"]["totals"].pop("works_seen")
     cov = build_coverage(facts, scope=SCOPE)
     data = cov.as_dict()
-    # The declared total stays the denominator; what changes is that the runs
-    # own numbers can no longer be trusted together.
+    # The declared total stays the denominator; the walk simply saw fewer.
     assert data["denominators"]["artists_total"] == 5
-    assert cov.consistent is False
-    assert any("total_artists_mismatch" in reason for reason in cov.reasons)
-    assert cov.overall == "unknown"
+    assert cov.consistent is True
+    # And the artist list must not be summed into a range it does not cover.
+    assert data["counts"]["artworks_seen"] is None
+    assert any("artworks_seen_unknown" in reason for reason in cov.reasons)
 
 
 def test_without_any_totals_the_run_level_numbers_stay_absent():

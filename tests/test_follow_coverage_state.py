@@ -27,14 +27,28 @@ def facts(*, status="completed", stop="", artists=(), totals=None, **extra):
 
 
 def artist(artist_id="a-1", state="completed", pages=3):
-    return {"artist_id": artist_id, "state": state, "pages": pages, "newest_illust_id": ""}
+    """One artist row; the number is works seen (the DTO word is works_seen)."""
+    return {"artist_id": artist_id, "state": state, "works_seen": pages, "newest_illust_id": ""}
+
+
+def page(identity="w-1#0", state="saved_new", content="sha-1"):
+    return {"page_identity": identity, "state": state, "content_sha256": content}
+
+
+def delivered(*identities):
+    """Page evidence where every given identity was delivered with a version."""
+    return {
+        "expected": list(identities),
+        "observed": [page(item) for item in identities],
+    }
 
 
 def test_a_finished_walk_is_complete_on_all_three_dimensions():
     states = coverage_states(
         facts(
             artists=[artist("a-1"), artist("a-2")],
-            totals={"works_seen": 13, "excluded_by_filter": 4, "unknown_fields": 0, "pages_saved": 9},
+            totals={"works_seen": 13, "excluded_by_filter": 4, "unknown_fields": 0},
+            pages=delivered("w-1#0", "w-2#0"),
         )
     )
     assert states["enumeration"] == {"state": "complete", "reason": None}
@@ -73,7 +87,8 @@ def test_unfollowed_artists_never_block_completion():
     states = coverage_states(
         facts(
             artists=[artist("a-1"), artist("a-2", state="unfollowed")],
-            totals={"works_seen": 3, "excluded_by_filter": 0, "pages_saved": 3},
+            totals={"works_seen": 3, "excluded_by_filter": 0},
+            pages=delivered("w-1#0", "w-2#0", "w-3#0"),
         )
     )
     assert states["enumeration"]["state"] == "complete"
@@ -86,10 +101,12 @@ def test_the_three_dimensions_stay_independent():
             # Nothing was saved, yet the walk itself finished and the filter
             # still met unknown fields: three different answers at once.
             artists=[artist("a-1", pages=0)],
-            totals={"unknown_fields": 2, "pages_saved": 0, "works_seen": 5, "excluded_by_filter": 2},
+            totals={"unknown_fields": 2, "works_seen": 5, "excluded_by_filter": 2},
+            # Two pages were expected and neither was delivered, while the walk
+            # itself finished and the filter met unknown fields: three answers.
+            pages={"expected": ["w-1#0", "w-1#1"], "observed": []},
         )
     )
-    # The filter met unknown fields while the walk and the delivery finished.
     assert states["decision"] == {"state": "unknown_fields", "reason": "unknown_fields:2"}
     assert states["enumeration"]["state"] == "complete"
     assert states["delivery"]["state"] == "missing"
@@ -112,31 +129,49 @@ def test_with_no_filter_facts_the_decision_is_skipped_not_applied():
     assert states["decision"] == {"state": "skipped", "reason": "no_filter_facts"}
 
 
-def test_a_scope_where_everything_was_filtered_out_is_complete_delivery():
+def test_an_empty_expected_page_set_with_evidence_is_complete_delivery():
     states = coverage_states(
-        facts(artists=[artist("a-1", pages=0)], totals={"works_seen": 4, "excluded_by_filter": 4, "pages_saved": 0})
+        facts(
+            artists=[artist("a-1", pages=0)],
+            totals={"works_seen": 4, "excluded_by_filter": 4},
+            pages={"expected": [], "observed": []},
+        )
     )
-    # Nothing should have been saved, and nothing was: that is complete, not missing.
+    # Nothing should have been saved, and the evidence says so: complete.
     assert states["delivery"] == {"state": "complete", "reason": None}
 
 
-def test_an_unmeasured_saving_side_is_unknown_not_complete():
+def test_no_page_evidence_is_unknown_not_complete():
     states = coverage_states(facts(artists=[artist("a-1")], totals={}))
-    assert states["delivery"] == {"state": "unknown", "reason": "saving_not_measured"}
+    assert states["delivery"] == {
+        "state": "unknown",
+        "reason": "page_evidence_missing:pages_expected",
+    }
 
 
-def test_pages_that_should_have_been_saved_but_were_not_are_missing():
+def test_expected_pages_that_were_never_delivered_are_missing():
     states = coverage_states(
-        facts(artists=[artist("a-1")], totals={"works_seen": 30, "excluded_by_filter": 10, "pages_saved": 0})
+        facts(
+            artists=[artist("a-1")],
+            totals={"works_seen": 30, "excluded_by_filter": 10},
+            pages={"expected": ["w-1#0", "w-2#0", "w-3#0"], "observed": []},
+        )
     )
-    assert states["delivery"] == {"state": "missing", "reason": "pages_not_saved:20"}
+    assert states["delivery"] == {"state": "missing", "reason": "pages_not_delivered:3"}
 
 
-def test_a_partial_saving_shortfall_is_partial_and_names_the_count():
+def test_a_partial_delivery_is_partial_and_names_the_count():
     states = coverage_states(
-        facts(artists=[artist("a-1")], totals={"works_seen": 30, "excluded_by_filter": 10, "pages_saved": 12})
+        facts(
+            artists=[artist("a-1")],
+            totals={"works_seen": 30, "excluded_by_filter": 10},
+            pages={
+                "expected": ["w-1#0", "w-2#0", "w-3#0"],
+                "observed": [page("w-1#0")],
+            },
+        )
     )
-    assert states["delivery"] == {"state": "partial", "reason": "pages_not_saved:8"}
+    assert states["delivery"] == {"state": "partial", "reason": "pages_not_delivered:2"}
 
 
 def test_a_known_gap_outranks_the_unmeasured_saving_side():
@@ -145,26 +180,55 @@ def test_a_known_gap_outranks_the_unmeasured_saving_side():
     assert states["delivery"]["reason"] == "artist_pending:a-1"
 
 
-def test_a_missing_works_seen_count_is_unknown_even_with_pages_saved():
-    states = coverage_states(facts(artists=[artist("a-1")], totals={"excluded_by_filter": 15, "pages_saved": 19}))
-    assert states["delivery"] == {"state": "unknown", "reason": "saving_not_provable:works_seen"}
-
-
-def test_a_missing_exclusion_count_is_unknown_not_complete():
-    states = coverage_states(facts(artists=[artist("a-1")], totals={"works_seen": 20, "pages_saved": 2}))
-    assert states["delivery"] == {"state": "unknown", "reason": "saving_not_provable:excluded_by_filter"}
-
-
-def test_three_complete_counts_that_add_up_are_complete():
+def test_works_and_pages_alone_cannot_prove_a_delivery():
+    """One work, one saved page, no page set: that is unproven, not complete."""
     states = coverage_states(
-        facts(artists=[artist("a-1")], totals={"works_seen": 34, "excluded_by_filter": 15, "pages_saved": 19})
+        facts(artists=[artist("a-1")], totals={"works_seen": 1, "excluded_by_filter": 0, "pages_saved": 1})
+    )
+    assert states["delivery"]["state"] == "unknown"
+
+
+def test_one_work_saved_as_three_pages_can_be_complete():
+    """Three pages of one work: the page set proves it, the work count does not."""
+    states = coverage_states(
+        facts(
+            artists=[artist("a-1", pages=1)],
+            totals={"works_seen": 1, "excluded_by_filter": 0, "pages_saved": 3},
+            pages=delivered("w-1#0", "w-1#1", "w-1#2"),
+        )
     )
     assert states["delivery"] == {"state": "complete", "reason": None}
 
 
-def test_saving_not_measured_still_wins_when_pages_saved_itself_is_absent():
-    states = coverage_states(facts(artists=[artist("a-1")], totals={"works_seen": 20, "excluded_by_filter": 5}))
-    assert states["delivery"] == {"state": "unknown", "reason": "saving_not_measured"}
+def test_a_legacy_pages_saved_total_is_irrelevant_to_completeness():
+    # The crawl total is missing here; the page evidence is what decides.
+    states = coverage_states(
+        facts(artists=[artist("a-1")], totals={"works_seen": 1}, pages=delivered("w-1#0"))
+    )
+    assert states["delivery"] == {"state": "complete", "reason": None}
+
+
+def test_a_page_without_a_content_version_is_not_delivered():
+    states = coverage_states(
+        facts(
+            artists=[artist("a-1")],
+            pages={"expected": ["w-1#0"], "observed": [page("w-1#0", content="")]},
+        )
+    )
+    assert states["delivery"]["state"] == "missing"
+
+
+def test_two_conflicting_observations_of_one_page_are_not_a_delivery():
+    states = coverage_states(
+        facts(
+            artists=[artist("a-1")],
+            pages={
+                "expected": ["w-1#0"],
+                "observed": [page("w-1#0", "saved_new"), page("w-1#0", "failed")],
+            },
+        )
+    )
+    assert states["delivery"]["state"] == "missing"
 
 def test_an_unfinished_run_cannot_claim_complete_delivery():
     states = coverage_states(facts(status="running", artists=[artist("a-1", state="completed")]))

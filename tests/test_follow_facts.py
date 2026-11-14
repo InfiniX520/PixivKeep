@@ -79,7 +79,7 @@ def test_artists_are_sorted_by_id_and_keep_their_counters():
     assert facts["artists"][1] == {
         "artist_id": "b",
         "state": "done",
-        "pages": 12,
+        "works_seen": 12,
         "newest_illust_id": "9",
         "swept_at": "",
     }
