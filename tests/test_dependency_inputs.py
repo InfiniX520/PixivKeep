@@ -286,3 +286,53 @@ def test_the_matrix_result_keeps_the_frozen_five_keys():
         "verdict",
     }
 
+
+# --- a declaration that does not apply here is not a missing package -------
+
+
+def test_an_inapplicable_declaration_is_not_a_missing_package():
+    """sys_platform == "linux" on Windows is not a package to go and install."""
+    view = runtime_view(">=1 ; sys_platform == 'linux'")
+    result = matrix.compare(view, installed_view(), {"modules": []})
+    assert result["missing"] == []
+    assert result["version_mismatch"] == []
+    assert result["verdict"] == "ok"
+    rows = matrix.constraints(view)
+    assert rows[0]["excluded"][0]["reason"].startswith("marker_not_applicable:")
+
+
+def test_the_applicable_declaration_decides_when_a_name_is_declared_twice():
+    view = declared_view(
+        runtime=[
+            {"name": "example", "specifier": ">=1 ; sys_platform == 'linux'"},
+            {"name": "example", "specifier": ">=2"},
+        ]
+    )
+    result = matrix.compare(view, installed_view(("example", "1.5")), {"modules": []})
+    assert result["version_mismatch"] == [
+        {"name": "example", "declared": ">=2", "installed": "1.5"}
+    ]
+    assert result["verdict"] == "attention"
+    rows = matrix.constraints(view)
+    assert rows[0]["applies"] == [">=2"]
+    assert rows[0]["excluded"][0]["specifier"] == ">=1"
+
+
+def test_a_missing_runtime_dependency_without_a_marker_is_still_attention():
+    result = matrix.compare(runtime_view(">=1"), installed_view(), {"modules": []})
+    assert result["missing"] == [{"name": "example", "specifier": ">=1"}]
+    assert result["verdict"] == "attention"
+
+
+def test_an_inapplicable_declaration_of_an_installed_package_is_still_unused():
+    """Scope note: only missing / mismatch / verdict ignore inapplicable rows.
+
+    unused_declared is untouched by this rule on purpose - whether a
+    platform-specific declaration should also be hidden there is a separate
+    decision for the integrator.
+    """
+    view = runtime_view(">=1 ; sys_platform == 'linux'")
+    result = matrix.compare(view, installed_view(("example", "2.0")), {"modules": []})
+    assert result["verdict"] == "ok"
+    assert result["unused_declared"] == [{"name": "example"}]
+

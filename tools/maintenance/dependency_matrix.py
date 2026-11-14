@@ -315,10 +315,20 @@ def compare(declared: object, installed: object, imported: object) -> dict[str, 
         name = str(entry["name"])
         group = str(entry["group"])
         constraints = entry["constraints"]  # type: ignore[assignment]
+        applicable = [item for item in constraints if item["applies"] is not False]
         display = _display(constraints)
         judgeable = _judgeable(constraints)
-        unjudgeable = [item for item in constraints if item["applies"] is None]
+        unjudgeable = [item for item in applicable if item["applies"] is None]
         found = installed_view.get(key)
+        if not applicable:
+            # Every declaration for this name proved inapplicable on this
+            # interpreter (sys_platform == "linux" on Windows, python_version
+            # guards, ...).  It is not a missing package, it cannot mismatch and
+            # it cannot move the verdict; the constraint stays visible in
+            # constraints[].excluded with the marker reason.
+            if found is not None and key not in imported_effective:
+                unused_declared.append({"name": name})
+            continue
         if found is None:
             missing.append({"name": name, "specifier": display})
             if group == "runtime":
