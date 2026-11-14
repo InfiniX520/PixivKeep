@@ -26,7 +26,11 @@ def one(artist_id, state, pages=0):
 
 
 def facts(artists, *, totals=None, status="running"):
-    payload = {"run": {"status": status, "stop_reason": ""}, "artists": list(artists), "incomplete": []}
+    payload = {
+        "run": {"status": status, "stop_reason": ""},
+        "artists": list(artists),
+        "incomplete": [],
+    }
     if totals is not None:
         payload["run"]["totals"] = dict(totals)
     return payload
@@ -73,7 +77,9 @@ def test_an_unrecognised_state_is_unverified_and_inconsistent():
 
 
 def test_the_bucket_identity_is_checked():
-    report = coverage_counts(facts([one("a", "completed"), one("b", "failed")], totals={"total_artists": 2}))
+    report = coverage_counts(
+        facts([one("a", "completed"), one("b", "failed")], totals={"total_artists": 2})
+    )
     counts = report["counts"]
     total = (
         counts["artists_confirmed"]
@@ -90,10 +96,13 @@ def test_the_bucket_identity_is_checked():
 
 def test_works_seen_is_summed_only_when_the_list_is_proven_complete():
     report = coverage_counts(
-        facts([one("a", "completed", pages=30), one("b", "empty", pages=12)], totals={"total_artists": 2})
+        facts(
+            [one("a", "completed", pages=30), one("b", "empty", pages=12)],
+            totals={"total_artists": 2},
+        )
     )
-    assert report["counts"]["works_seen"] == 42
-    assert "works_seen_from_artist_sum" in report["reasons"]
+    assert report["counts"]["artworks_seen"] == 42
+    assert "artworks_seen_from_artist_sum" in report["reasons"]
     # The annotation is about provenance, not about trust: it does not, by
     # itself, flip consistency.
     assert report["consistent"] is True
@@ -103,39 +112,42 @@ def test_works_seen_stays_unknown_when_the_list_may_be_a_page():
     report = coverage_counts(
         facts([one("a", "completed", pages=30)], totals={"total_artists": 9})
     )
-    assert report["counts"]["works_seen"] is None
-    assert "works_seen_unknown:artist_list_not_proven_complete" in report["reasons"]
+    assert report["counts"]["artworks_seen"] is None
+    assert "artworks_seen_unknown:artist_list_not_proven_complete" in report["reasons"]
 
 
 def test_works_seen_stays_unknown_without_a_declared_total():
     report = coverage_counts(facts([one("a", "completed", pages=30)]))
-    assert report["counts"]["works_seen"] is None
-    assert "works_seen_unknown:artist_list_not_proven_complete" in report["reasons"]
+    assert report["counts"]["artworks_seen"] is None
+    assert "artworks_seen_unknown:artist_list_not_proven_complete" in report["reasons"]
 
 
 def test_works_seen_stays_unknown_when_a_page_count_is_missing():
     report = coverage_counts(
-        facts([one("a", "completed", pages=30), {"artist_id": "b", "state": "completed", "pages": None}],
-              totals={"total_artists": 2})
+        facts(
+            [one("a", "completed", pages=30),
+             {"artist_id": "b", "state": "completed", "pages": None}],
+            totals={"total_artists": 2},
+        )
     )
-    assert report["counts"]["works_seen"] is None
-    assert "works_seen_unknown:artist_list_not_proven_complete" in report["reasons"]
+    assert report["counts"]["artworks_seen"] is None
+    assert "artworks_seen_unknown:artist_list_not_proven_complete" in report["reasons"]
 
 
 def test_a_declared_works_seen_beats_the_sum_even_when_they_differ():
     report = coverage_counts(
         facts([one("a", "completed", pages=30)], totals={"total_artists": 1, "works_seen": 99})
     )
-    assert report["counts"]["works_seen"] == 99
-    assert "works_seen_from_artist_sum" not in report["reasons"]
+    assert report["counts"]["artworks_seen"] == 99
+    assert "artworks_seen_from_artist_sum" not in report["reasons"]
 
 
 def test_a_negative_declared_works_seen_falls_back_to_the_provable_sum():
     report = coverage_counts(
         facts([one("a", "completed", pages=7)], totals={"total_artists": 1, "works_seen": -5})
     )
-    assert report["counts"]["works_seen"] == 7
-    assert "works_seen_from_artist_sum" in report["reasons"]
+    assert report["counts"]["artworks_seen"] == 7
+    assert "artworks_seen_from_artist_sum" in report["reasons"]
 
 
 # ------------------------------------------------------- the other five totals
@@ -145,7 +157,14 @@ def test_the_other_run_level_numbers_are_never_derived():
     report = coverage_counts(
         facts([one("a", "completed", pages=99)], totals={"total_artists": 1})
     )
-    for key in ("pages_saved", "pages_already_verified", "excluded_by_filter", "unknown_fields", "duplicate_pages"):
+    derived_from_nothing = (
+        "pages_saved",
+        "pages_already_verified",
+        "excluded_by_filter",
+        "unknown_fields",
+        "duplicate_pages",
+    )
+    for key in derived_from_nothing:
         assert report["counts"][key] is None, key
         assert "not_measured:" + key in report["reasons"], key
 
@@ -153,8 +172,10 @@ def test_the_other_run_level_numbers_are_never_derived():
 def test_the_six_run_level_keys_are_passed_through_untouched():
     totals = complete_totals(1)
     report = coverage_counts(facts([one("a", "completed")], totals=totals))
+    # The report word and the storage word differ for exactly one key.
+    source = {"artworks_seen": "works_seen"}
     for key in RUN_COUNT_KEYS:
-        assert report["counts"][key] == totals[key], key
+        assert report["counts"][key] == totals[source.get(key, key)], key
 
 
 # ------------------------------------------------------------- denominators
@@ -194,7 +215,7 @@ def test_a_summed_works_seen_never_reaches_the_denominator():
     report = coverage_counts(
         facts([one("a", "completed", pages=30)], totals={"total_artists": 1})
     )
-    assert report["counts"]["works_seen"] == 30
+    assert report["counts"]["artworks_seen"] == 30
     assert report["denominators"]["artworks_total"] is None
 
 

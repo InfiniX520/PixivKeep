@@ -8,11 +8,12 @@ Two families of numbers, deliberately kept apart:
   known to be exhaustive over the range, so summing it or scaling it up would
   be an estimate wearing a counter's clothes.  A missing key is None.
 
-The one exception is `works_seen`: when the artist list can be *proven* to be
+The one exception is `artworks_seen` (recorded as `works_seen` in the crawl
+state): when the artist list can be *proven* to be
 the whole run (its length equals the declared total and every artist carries a
 usable page count), the sum of those counts is the number of works seen.  That
 is arithmetic on proven-complete rows, not scaling, so the report names the
-source (`works_seen_from_artist_sum`) instead of hiding it.  Nothing else may be
+source (`artworks_seen_from_artist_sum`) instead of hiding it.  Nothing else may be
 derived this way: no other run level number has a per-artist carrier.
 
 `consistent` is True only when every check that can be made with the numbers at
@@ -47,7 +48,7 @@ ARTIST_COUNT_KEYS = (
 
 #: Only a run level total may fill these; nothing else is accepted.
 RUN_COUNT_KEYS = (
-    "works_seen",
+    "artworks_seen",
     "pages_saved",
     "pages_already_verified",
     "excluded_by_filter",
@@ -130,8 +131,10 @@ def coverage_counts(facts: object) -> dict[str, object]:
 
     counts: dict[str, int | None] = {key: artist_counts[key] for key in ARTIST_COUNT_KEYS}
     for key in RUN_COUNT_KEYS:
-        if key == "works_seen":
-            continue  # resolved below: a declared total, or a proven-complete sum
+        if key == "artworks_seen":
+            # Resolved below from totals["works_seen"] (the storage word) or a
+            # proven-complete sum; the two words are deliberate, see docstring.
+            continue
         counts[key] = _int_or_none(totals.get(key))
         if counts[key] is None:
             reasons.append("not_measured:" + key)
@@ -168,6 +171,8 @@ def coverage_counts(facts: object) -> dict[str, object]:
             artworks_total = _int_or_none(totals[key])
             break
 
+    # Two vocabularies on purpose: the report says artworks_seen, the crawl
+    # state records works_seen.  Same fact, different layers.
     works_seen = _int_or_none(totals.get("works_seen"))
     if works_seen is None:
         provable = (
@@ -180,10 +185,10 @@ def coverage_counts(facts: object) -> dict[str, object]:
         )
         if provable:
             works_seen = sum(int(item["pages"]) for item in artists)
-            reasons.append("works_seen_from_artist_sum")
+            reasons.append("artworks_seen_from_artist_sum")
         else:
-            reasons.append("works_seen_unknown:artist_list_not_proven_complete")
-    counts["works_seen"] = works_seen
+            reasons.append("artworks_seen_unknown:artist_list_not_proven_complete")
+    counts["artworks_seen"] = works_seen
     pages_saved = counts["pages_saved"]
     excluded = counts["excluded_by_filter"]
     if works_seen is not None and pages_saved is not None and excluded is not None:
