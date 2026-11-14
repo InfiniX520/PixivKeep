@@ -5,16 +5,21 @@ delete one at any time, and this module's whole job is to notice that *before*
 anything is written and to say "keep the website, ask a human" instead of
 pushing an older plan over it.
 
-Two properties are the point of the design:
+Three properties are the point of the design:
 
 * **it never emits a write.**  Every decision carries an action from a closed
   table, and none of those actions is "write".  `writes_for` returns [] for any
   input; the tests pin that, because "we only keep things" is easy to say and
   easy to lose in a later edit.
-* **unknown is not "unchanged".**  If either snapshot is incomplete, or an
-  artist the plan talks about is missing from the current snapshot, the answer
-  is `unknown` and a human decides.  Treating a missing fact as "nothing
-  changed" is how an old plan ends up overwriting a manual edit.
+* **unknown is not "unchanged", and it is not "known bad" either.**  An artist
+  the plan knows but the fresh snapshot does not is a *known* fact (artist_gone)
+  and a human must look; only a picture that cannot be read at all is unknown.
+  Treating a missing fact as "nothing changed" is how an old plan overwrites a
+  manual edit.
+* **a group is (visibility, name), never a bare name.**  The website lets the
+  public and the private side carry the same name with different members, so a
+  bare name that matches both sides is ambiguous and the answer is "ask a
+  human", not "merge them" and not "pick one".
 
 The snapshots and the plan are the shapes organizer/snapshots.py and
 organizer/plans.py already persist (see E1_PLAN.md 3.4).  Nothing here opens a
@@ -22,16 +27,25 @@ file, a database or a socket; the caller passes plain dictionaries.
 """
 from __future__ import annotations
 
-KINDS = ("unchanged", "moved", "group_renamed", "group_deleted", "new_member", "unknown")
+KINDS = (
+    "unchanged",
+    "moved",
+    "group_renamed",
+    "group_deleted",
+    "artist_gone",
+    "new_member",
+    "unknown",
+)
 ACTIONS = ("keep", "replan", "needs_human")
 
 #: kind -> action.  A closed table, so a new kind cannot quietly default to
-#: something optimistic: adding one here without an action fails the import test.
+#: something optimistic: adding one here without an action fails the test.
 ACTION_FOR = {
     "unchanged": "keep",
     "moved": "needs_human",
     "group_renamed": "needs_human",
     "group_deleted": "needs_human",
+    "artist_gone": "needs_human",
     "new_member": "replan",
     "unknown": "needs_human",
 }
@@ -45,9 +59,21 @@ REASONS = (
     "target_group_deleted",
     "artist_not_followed_any_more",
     "artist_appeared_since_snapshot",
+    "group_ambiguous",
     "snapshot_incomplete",
-    "membership_missing",
 )
+
+#: The two visibility partitions the snapshot stores; artists carry "0"/"1".
+SIDES = ("show", "hide")
+_SIDE_OF_CODE = {"0": "show", "1": "hide"}
+
+
+def _side(value):
+    """Normalise an artist's visibility to a partition name, or None."""
+    text = str(value)
+    if text in SIDES:
+        return text
+    return _SIDE_OF_CODE.get(text)
 
 
 def _groups_of(snapshot, artist_id):
@@ -63,12 +89,12 @@ def _groups_of(snapshot, artist_id):
 
 
 def _directory(snapshot):
-    """group name -> set of member artist ids, from the membership partitions."""
+    """(side, name) -> set of member artist ids, from the membership partitions."""
     directory = {}
     partitions = snapshot.get("memberships") or {}
     if not isinstance(partitions, dict):
         return None
-    for side in ("show", "hide"):
+    for side in SIDES:
         side_partition = partitions.get(side) or {}
         if not isinstance(side_partition, dict):
             return None
@@ -78,47 +104,92 @@ def _directory(snapshot):
             ids = saved.get("ids")
             if not isinstance(ids, (list, tuple)):
                 return None
-            directory.setdefault(str(tag), set()).update(str(item) for item in ids)
+            directory.setdefault((side, str(tag)), set()).update(str(item) for item in ids)
     return directory
 
 
-def _plan_targets(plan):
-    """artist_id -> (sorted target groups, sorted groups at planning time)."""
-    targets = {}
+def _identity(value):
+    """A group identity from a bare name or an explicit (side, name) pair.
+
+    Returns (identity, None), or (None, "ambiguous") when the value cannot be
+    read as one.  A dict with visibility/name is accepted too, so a caller can
+    be explicit without knowing the tuple spelling.
+    """
+    if isinstance(value, dict):
+        name = value.get("name")
+        side = _side(value.get("visibility", ""))
+        if name is None or side is None:
+            return None, "ambiguous"
+        return (side, str(name)), None
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        side = _side(value[0])
+        if side is None:
+            return None, "ambiguous"
+        return (side, str(value[1])), None
+    if isinstance(value, str) and value:
+        return ("?", value), None
+    return None, "ambiguous"
+
+
+def _resolve(value, directories, artist_side=None):
+    """Resolve one target to a concrete (side, name), or report ambiguity.
+
+    A bare name that appears on both sides is not guessed: the website can
+    hold two groups with the same name and different members, and merging
+    them would turn "the user regrouped on the private side" into "the
+    public side changed too".  When the name appears nowhere, the artist it
+    belongs to is the only side that can make sense of it.
+    """
+    identity, problem = _identity(value)
+    if identity is None:
+        return None, problem
+    side, name = identity
+    if side != "?":
+        return (side, name), None
+    sides = set()
+    for directory in directories:
+        if not directory:
+            continue
+        for candidate_side, candidate_name in directory:
+            if candidate_name == name:
+                sides.add(candidate_side)
+    if len(sides) > 1:
+        return None, "ambiguous"
+    if not sides:
+        return ((artist_side, name) if artist_side else (None, name)), None
+    return (next(iter(sides)), name), None
+
+
+def _plan_rows(plan):
+    """artist_id -> (target entries, groups recorded at planning time, row)."""
+    rows = {}
     for row in plan.get("artists") or ():
         if not isinstance(row, dict):
             continue
         artist_id = row.get("artist_id")
         if artist_id is None:
             continue
-        target = row.get("target")
-        before = row.get("groups")
-        targets[str(artist_id)] = (
-            sorted({str(name) for name in (target or ())}),
-            sorted({str(name) for name in (before or ())}),
+        rows[str(artist_id)] = (
+            list(row.get("target") or ()),
+            sorted({str(name) for name in (row.get("groups") or ())}),
+            row,
         )
-    return targets
+    return rows
 
 
 def renames(before, after):
-    """old name -> new name, but only where the member sets are identical.
-
-    A group is identified by its name and nothing else (the website exposes no
-    stable group id), so "old name gone, new name in its place, same members" is
-    the only rename this module is willing to believe.  Anything else stays a
-    deletion plus an addition, and a deletion is never recreated.
-    """
+    """(side, old) -> (side, new), but only where the member sets are identical."""
     old = _directory(before) or {}
     new = _directory(after) or {}
     dropped = sorted(set(old) - set(new))
     appeared = sorted(set(new) - set(old))
     mapping = {}
-    for old_name in dropped:
-        for new_name in appeared:
-            if new_name in mapping.values():
+    for old_key in dropped:
+        for new_key in appeared:
+            if new_key in mapping.values() or old_key[0] != new_key[0]:
                 continue
-            if old[old_name] == new[new_name]:
-                mapping[old_name] = new_name
+            if old[old_key] == new[new_key]:
+                mapping[old_key] = new_key
                 break
     return mapping
 
@@ -139,55 +210,65 @@ def _decision(artist_id, kind, reason, before_groups, after_groups, observed_at)
 
 
 def decide(before, after, plan, *, observed_at=""):
-    """One decision per artist the plan or the newer snapshot talks about.
-
-    Deterministic and order-independent: the result is sorted by artist id, and
-    it depends only on the three arguments (they are read, never modified).
-    """
-    targets = _plan_targets(plan)
+    """One decision per artist the plan or the newer snapshot talks about."""
+    rows = _plan_rows(plan)
     old_directory = _directory(before)
     new_directory = _directory(after)
     # A partition we could not read is not a partition that shrank.  Without
-    # both directories there is no "deleted" and no "renamed" to speak of,
-    # only an incomplete picture.
+    # both directories there is no "deleted" and no "renamed" to speak of.
     readable = old_directory is not None and new_directory is not None
     renamed = renames(before, after) if readable else {}
     if readable:
-        deleted_after_rename = set(old_directory) - set(new_directory) - set(renamed)
+        deleted_keys = set(old_directory) - set(new_directory) - set(renamed)
     else:
-        deleted_after_rename = set()
-    complete = (
+        deleted_keys = set()
+    joined = (
         bool(before.get("memberships_complete"))
         and bool(after.get("memberships_complete"))
         and readable
     )
 
     decisions = []
-    seen = set()
-    for artist_id in sorted(targets):
-        desired, planned_from = targets[artist_id]
+    for artist_id in sorted(rows):
+        targets, planned_from, _row = rows[artist_id]
         current = _groups_of(after, artist_id)
-        previous = _groups_of(before, artist_id)
-        seen.add(artist_id)
+        present_before = _groups_of(before, artist_id) is not None
 
-        if not complete or current is None or previous is None:
-            reason = "snapshot_incomplete" if not complete else "membership_missing"
-            decisions.append(
-                _decision(artist_id, "unknown", reason, planned_from, current, observed_at)
-            )
+        if artist_id not in (after.get("artists") or {}):
+            if not joined:
+                decisions.append(_decision(artist_id, "unknown", "snapshot_incomplete",
+                                           planned_from, None, observed_at))
+            else:
+                decisions.append(_decision(artist_id, "artist_gone",
+                                           "artist_not_followed_any_more",
+                                           planned_from, None, observed_at))
             continue
-        gone_names = [name for name in desired if name in deleted_after_rename]
-        if gone_names:
+        if not joined or current is None or not present_before:
+            decisions.append(_decision(artist_id, "unknown", "snapshot_incomplete",
+                                       planned_from, current, observed_at))
+            continue
+
+        artist_side = _side(((_row or {}).get("visibility", "")))
+        resolved, problem = [], None
+        for entry in targets:
+            identity, issue = _resolve(entry, (new_directory, old_directory), artist_side)
+            if issue:
+                problem = issue
+                break
+            resolved.append(identity)
+        if problem:
+            decisions.append(_decision(artist_id, "unknown", "group_ambiguous",
+                                       planned_from, current, observed_at))
+            continue
+        if any(identity in deleted_keys for identity in resolved):
             decisions.append(_decision(artist_id, "group_deleted", "target_group_deleted",
                                        planned_from, current, observed_at))
             continue
-        if any(name in renamed for name in desired):
+        if any(identity in renamed for identity in resolved):
             decisions.append(_decision(artist_id, "group_renamed", "target_group_renamed",
                                        planned_from, current, observed_at))
             continue
         if current != planned_from:
-            # The user regrouped this artist after the plan was made.  The
-            # website wins; the plan is not re-applied and a human decides.
             decisions.append(_decision(artist_id, "moved", "website_groups_changed",
                                        planned_from, current, observed_at))
             continue
@@ -195,15 +276,14 @@ def decide(before, after, plan, *, observed_at=""):
                                    planned_from, current, observed_at))
 
     # "New" means appeared since the previous snapshot.  An artist who was
-    # already there but is not in this plan is simply not in this batch, which
-    # is not a decision at all.
+    # already there but is not in this plan is simply not in this batch.
     previous_ids = {str(key) for key in (before.get("artists") or {})}
-    for artist_id in sorted((after.get("artists") or {})):
+    for artist_id in sorted(after.get("artists") or {}):
         artist_id = str(artist_id)
-        if artist_id in seen or artist_id in previous_ids:
+        if artist_id in rows or artist_id in previous_ids:
             continue
         current = _groups_of(after, artist_id)
-        if not complete or current is None:
+        if not joined or current is None:
             decisions.append(_decision(artist_id, "unknown", "snapshot_incomplete",
                                        (), current, observed_at))
             continue
@@ -213,12 +293,7 @@ def decide(before, after, plan, *, observed_at=""):
 
 
 def writes_for(decisions):
-    """Always empty.  This module never turns a conflict into a write.
-
-    Kept as a real function (rather than a comment) so a caller can assert the
-    contract on its own decisions, and so a future "replan" action cannot start
-    writing here without this function changing too.
-    """
+    """Always empty.  This module never turns a conflict into a write."""
     return []
 
 

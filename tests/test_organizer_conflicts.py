@@ -77,7 +77,7 @@ def test_a_user_regroup_is_kept_and_never_overwritten():
 def test_a_renamed_group_is_not_read_as_delete_plus_create():
     before = snapshot({"a": ["old"]}, {"old": ["a"]})
     after = snapshot({"a": ["new"]}, {"new": ["a"]}, snapshot_id="s2")
-    assert conflicts.renames(before, after) == {"old": "new"}
+    assert conflicts.renames(before, after) == {("show", "old"): ("show", "new")}
     item = only(conflicts.decide(before, after, plan(("a", ["old"], ["old"]))), "a")
     assert item["kind"] == "group_renamed"
     assert item["action"] == "needs_human"
@@ -87,6 +87,7 @@ def test_a_rename_with_different_members_is_not_a_rename():
     before = snapshot({"a": ["old"], "b": []}, {"old": ["a"]})
     after = snapshot({"a": ["new"], "b": ["new"]}, {"new": ["a", "b"]}, snapshot_id="s2")
     assert conflicts.renames(before, after) == {}
+    assert set(conflicts._directory(after)) == {("show", "new")}
 
 
 def test_a_deleted_group_is_not_recreated():
@@ -105,13 +106,60 @@ def test_an_artist_that_appeared_since_the_snapshot_asks_for_a_replan():
     assert only(decisions, "b")["action"] == "replan"
 
 
-def test_an_artist_the_plan_knows_but_the_snapshot_does_not_is_unknown():
+def test_an_artist_the_plan_knows_but_the_snapshot_does_not_is_artist_gone():
+    """A known absence is not an unknown one: the snapshot read fine."""
     before = snapshot({"a": ["g1"], "b": ["g1"]}, {"g1": ["a", "b"]})
     after = snapshot({"a": ["g1"]}, {"g1": ["a"]}, snapshot_id="s2")
     item = only(conflicts.decide(before, after, plan(("b", ["g1"], ["g1"]))), "b")
-    assert item["kind"] == "unknown"
-    assert item["reason"] == "membership_missing"
+    assert item["kind"] == "artist_gone"
+    assert item["reason"] == "artist_not_followed_any_more"
     assert item["action"] == "needs_human"
+    assert conflicts.writes_for([item]) == []
+
+
+def test_a_gone_artist_in_an_incomplete_snapshot_stays_unknown():
+    """The same absence, but the snapshot cannot be trusted: unknown."""
+    before = snapshot({"a": ["g1"], "b": ["g1"]}, {"g1": ["a", "b"]})
+    after = snapshot({"a": ["g1"]}, {"g1": ["a"]}, complete=False, snapshot_id="s2")
+    item = only(conflicts.decide(before, after, plan(("b", ["g1"], ["g1"]))), "b")
+    assert item["kind"] == "unknown"
+    assert item["reason"] == "snapshot_incomplete"
+
+
+def cross_side_snapshot():
+    """Same group name on both sides, with different members."""
+    before = {
+        "id": "s1",
+        "memberships_complete": True,
+        "artists": {
+            "a": {"artist_id": "a", "visibility": "0", "groups": ["same"]},
+            "b": {"artist_id": "b", "visibility": "1", "groups": ["same"]},
+        },
+        "memberships": {
+            "show": {"same": {"ids": ["a"], "complete": True}},
+            "hide": {"same": {"ids": ["b"], "complete": True}},
+        },
+    }
+    return before, copy.deepcopy(before)
+
+
+def test_a_bare_group_name_that_exists_on_both_sides_is_ambiguous():
+    before, after = cross_side_snapshot()
+    item = only(conflicts.decide(before, after, plan(("a", ["same"], ["same"]))), "a")
+    assert item["kind"] == "unknown"
+    assert item["reason"] == "group_ambiguous"
+    assert item["action"] == "needs_human"
+
+
+def test_an_explicit_visibility_pair_is_judged_on_its_own_side_only():
+    before, after = cross_side_snapshot()
+    # The private side gains a group; the public side did not change at all.
+    after["memberships"]["hide"]["g2"] = {"ids": ["b"], "complete": True}
+    after["artists"]["b"]["groups"] = ["same", "g2"]
+    explicit = plan(("a", ["same"], [("show", "same")]))
+    assert only(conflicts.decide(before, after, explicit), "a")["kind"] == "unchanged"
+    private = plan(("b", ["same"], [("hide", "same")]))
+    assert only(conflicts.decide(before, after, private), "b")["kind"] == "moved"
 
 
 @pytest.mark.parametrize("broken", ["before", "after"])
