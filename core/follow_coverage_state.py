@@ -24,9 +24,14 @@ decision     <given>   facts["decision"] carries a valid state
              applied   totals has excluded_by_filter (even 0) and no unknown fields
              skipped   no filter facts at all
 delivery     <given>   facts["delivery"] carries a valid state
-             missing   totals.pages_saved == 0 and no artist saw any work
-             partial   any artist in pending/running/deferred/failed, or run not completed
-             complete  run.status == "completed" and every artist finished
+             partial   any artist in pending/running/deferred/failed (a known gap
+                       outranks an unknown one), or run not completed, or a
+                       finished run that saved fewer pages than it should have
+             missing   the same shortfall when nothing at all was saved
+             unknown   no usable pages_saved count: "saved" was never measured,
+                       and an unmeasured fact is not a complete delivery
+             complete  run finished, every artist finished, pages_saved present
+                       and not below works_seen - excluded_by_filter
 """
 from __future__ import annotations
 
@@ -35,7 +40,7 @@ from typing import Any
 
 ENUMERATION_STATES = ("complete", "partial", "stopped", "failed")
 DECISION_STATES = ("applied", "unknown_fields", "skipped")
-DELIVERY_STATES = ("complete", "partial", "missing")
+DELIVERY_STATES = ("complete", "partial", "missing", "unknown")
 
 ARTIST_RETRY_STATES = ("pending", "running", "deferred", "failed")
 ARTIST_FINISHED_STATES = ("completed", "empty", "unfollowed")
@@ -145,6 +150,22 @@ def _decision(run: Mapping[str, Any], facts: Mapping[str, Any]) -> dict[str, Any
     return {"state": "skipped", "reason": "no_filter_facts"}
 
 
+def _count(value: object) -> int | None:
+    """A usable non-negative count, or None when the fact is not a measurement."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _expected_pages(totals: Mapping[str, Any]) -> int | None:
+    """How many pages this scope should have produced, when it is provable."""
+    seen = _count(totals.get("works_seen"))
+    excluded = _count(totals.get("excluded_by_filter"))
+    if seen is None or excluded is None:
+        return None
+    return max(0, seen - excluded)
+
+
 def _delivery(run: Mapping[str, Any], artists: list[Mapping[str, Any]], facts: Mapping[str, Any]) -> dict[str, Any]:
     given = _given(facts, "delivery")
     if given is not None:
@@ -152,13 +173,10 @@ def _delivery(run: Mapping[str, Any], artists: list[Mapping[str, Any]], facts: M
     if not artists:
         # Nothing was followed: there is nothing this walk failed to deliver.
         return {"state": "complete", "reason": "no_artists"}
-    totals = _totals(run)
-    saved = totals.get("pages_saved")
-    saw_work = any(isinstance(artist.get("pages"), int) and artist.get("pages") > 0 for artist in artists)
-    if isinstance(saved, int) and not isinstance(saved, bool) and saved == 0 and not saw_work:
-        return {"state": "missing", "reason": "nothing_saved"}
     retrying = _first_retrying(artists)
     if retrying is not None:
+        # A known gap outranks an unknown one: do not hide "still running"
+        # behind "we did not measure the saving side".
         return {
             "state": "partial",
             "reason": "artist_%s:%s" % (_state(retrying.get("state")), retrying.get("artist_id")),
@@ -175,6 +193,18 @@ def _delivery(run: Mapping[str, Any], artists: list[Mapping[str, Any]], facts: M
             "state": "partial",
             "reason": "artist_%s:%s" % (_state(unfinished[0].get("state")), unfinished[0].get("artist_id")),
         }
+    totals = _totals(run)
+    saved = _count(totals.get("pages_saved"))
+    if saved is None:
+        # The enumeration may be finished, but "saved" was never measured:
+        # an unmeasured side cannot be reported as a complete delivery.
+        return {"state": "unknown", "reason": "saving_not_measured"}
+    expected = _expected_pages(totals)
+    if expected is not None and expected > saved:
+        short = expected - saved
+        if saved == 0:
+            return {"state": "missing", "reason": "pages_not_saved:%d" % short}
+        return {"state": "partial", "reason": "pages_not_saved:%d" % short}
     return {"state": "complete", "reason": None}
 
 
