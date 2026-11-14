@@ -10,6 +10,7 @@ failure.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 
@@ -198,4 +199,53 @@ def sqlite3_connect(path):
     import sqlite3
 
     return sqlite3.connect(path, isolation_level=None)
+
+def test_a_primary_failure_keeps_its_cleanup_as_a_separate_field(tmp_path, monkeypatch):
+    library = make_library(tmp_path / "lib" / "library.sqlite3", jobs=1)
+    real_copy = m._file_group_copy
+
+    def copy_and_plant(source, target, group, workspace):
+        facts = real_copy(source, target, group, workspace)
+        (workspace.path / "stranger.bin").write_bytes(b"planted by nobody")
+        return facts
+
+    def refuse_manifest(directory, manifest):
+        raise OSError("synthetic manifest failure")
+
+    monkeypatch.setattr(m, "_file_group_copy", copy_and_plant)
+    monkeypatch.setattr(m, "_write_manifest", refuse_manifest)
+    with pytest.raises(m.LibraryMaintenanceError) as caught:
+        m.backup_library(library, tmp_path / "backups", label="cleanup", mode="file_group")
+    error = caught.value
+    assert error.code == "backup_manifest_failed"
+    assert "synthetic manifest failure" in error.detail
+    cleanup = error.cleanup
+    assert isinstance(cleanup, dict)
+    assert {"name": "stranger.bin", "reason": "unowned"} in cleanup["kept"]
+
+
+def test_the_cli_prints_the_cleanup_beside_the_failure(tmp_path, monkeypatch, capsys):
+    library = make_library(tmp_path / "lib" / "library.sqlite3", jobs=1)
+    real_copy = m._file_group_copy
+
+    def copy_and_plant(source, target, group, workspace):
+        facts = real_copy(source, target, group, workspace)
+        (workspace.path / "stranger.bin").write_bytes(b"planted by nobody")
+        return facts
+
+    def refuse_manifest(directory, manifest):
+        raise OSError("synthetic manifest failure")
+
+    monkeypatch.setattr(m, "_file_group_copy", copy_and_plant)
+    monkeypatch.setattr(m, "_write_manifest", refuse_manifest)
+    code = m.main(
+        ["--json", "backup", str(library), str(tmp_path / "backups"),
+         "--label", "cleanup", "--mode", "file_group"]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert code != 0
+    assert payload["status"] == "error"
+    assert payload["code"] == "backup_manifest_failed"
+    assert "stranger.bin" in payload["retained"]
+    assert payload["cleanup"]["state"] != "ok"
 

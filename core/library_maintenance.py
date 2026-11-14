@@ -104,6 +104,11 @@ class LibraryMaintenanceError(RuntimeError):
     def __init__(self, code: str, detail: str = "") -> None:
         self.code = code
         self.detail = detail
+        #: The cleanup of the workspace this call created, kept as a field of
+        #: its own.  A failure and what was left behind are two facts; folding
+        #: the second into the first's message makes it unreadable to a caller
+        #: that wants to act on it.
+        self.cleanup: dict[str, object] | None = None
         super().__init__(code if not detail else "%s: %s" % (code, detail))
 
 
@@ -1147,11 +1152,15 @@ def backup_library(
             raise
         if isinstance(error, LibraryMaintenanceError):
             error.detail = ("%s; %s" % (error.detail, summary)).strip("; ")
+            error.cleanup = cleanup
             raise error
         code = "backup_manifest_failed" if stage == "manifest" else "backup_failed"
-        raise BackupError(
-            code, "%s: %s; %s" % (type(error).__name__, error, summary)
-        ) from None
+        failure = BackupError(code, "%s: %s; %s" % (type(error).__name__, error, summary))
+        # The cleanup travels as its own field even when the failure was not one
+        # of ours: the reason the run stopped and what it left behind are two
+        # facts, and a caller may need to act on the second one.
+        failure.cleanup = cleanup
+        raise failure from None
 
 
 def _now_utc() -> str:
@@ -3176,13 +3185,20 @@ def main(argv: list[str] | None = None) -> int:
         return _EXIT_REFUSED
     except LibraryMaintenanceError as error:
         if as_json:
-            print(
-                json.dumps(
-                    {"status": "error", "code": error.code, "detail": error.detail},
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            )
+            payload: dict[str, object] = {
+                "status": "error",
+                "code": error.code,
+                "detail": error.detail,
+            }
+            cleanup = getattr(error, "cleanup", None)
+            if cleanup is not None:
+                # A separate field, not more prose: what failed and what was
+                # left behind are two facts a caller acts on differently.
+                payload["cleanup"] = cleanup
+                payload["retained"] = [
+                    item.get("name") for item in (cleanup.get("kept") or [])
+                ]
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
             print(
                 "失败: %s%s" % (error.code, (" " + error.detail) if error.detail else ""),
