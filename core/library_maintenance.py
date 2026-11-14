@@ -2637,7 +2637,13 @@ def _scan_lines(report: dict[str, object], *, continuation: bool = False) -> lis
 
 
 def _decode_outcome(reports: list[dict[str, object]]) -> int:
-    """2 when a file is known bad, 5 when it could not be judged, 0 when all passed."""
+    """2 when a file is known bad, 5 when it could not be judged, 0 when all passed.
+
+    "Passed" means the verdict still describes the file at that path.  A file
+    that changed while it was being checked is not a failure (nothing was
+    proven bad) and it is not a pass either (the verdict is about bytes that
+    are no longer there), so it lands on 5 with the other not-proven cases.
+    """
     structure = [
         str((item.get("quality") or {}).get("structure", {}).get("state"))
         for item in reports
@@ -2646,11 +2652,18 @@ def _decode_outcome(reports: list[dict[str, object]]) -> int:
         str((item.get("quality") or {}).get("decode", {}).get("state"))
         for item in reports
     ]
+    stability = [str(item.get("path_stability") or "unknown") for item in reports]
     if "failed" in structure or "failed" in decode:
         return 2
     if any(state != "ok" for state in structure) or any(state != "ok" for state in decode):
         return _EXIT_INCOMPLETE
+    if any(state != "unchanged" for state in stability):
+        return _EXIT_INCOMPLETE
     return 0
+
+
+_STABILITY_WORDS = {"unchanged": "未变动", "changed": "已变动", "unknown": "未证明"}
+_STABILITY_BYTES = {"unchanged": "是", "changed": "否（内容已变）", "unknown": "未证明"}
 
 
 def _decode_lines(reports: list[dict[str, object]], code: int) -> list[str]:
@@ -2663,6 +2676,15 @@ def _decode_lines(reports: list[dict[str, object]], code: int) -> list[str]:
             entry = quality.get(name) or {}
             reason = entry.get("reason")
             lines.append("  %s: %s%s" % (label, entry.get("state"), ("（%s）" % reason) if reason else ""))
+        stability = str(item.get("path_stability") or "unknown")
+        stability_reason = item.get("path_stability_reason")
+        lines.append(
+            "  路径稳定: %s%s"
+            % (
+                _STABILITY_WORDS.get(stability, stability),
+                ("（%s）" % stability_reason) if stability_reason else "",
+            )
+        )
         if item.get("receipt"):
             receipt = item["receipt"]
             # A receipt may say "not measured" (None) now that the receipt type
@@ -2680,13 +2702,19 @@ def _decode_lines(reports: list[dict[str, object]], code: int) -> list[str]:
                     "未知" if seconds is None else "%ss" % (seconds,),
                 )
             )
-        lines.append("  字节未变: %s" % ("是" if item.get("unchanged") else "否"))
+        # "unchanged" alone cannot carry this: a check that never afforded a
+        # hash still reports unchanged=True.  The stability field is the
+        # answer, and "we did not prove it" is a different word from "no".
+        lines.append("  字节未变: %s" % _STABILITY_BYTES.get(stability, "未证明"))
     if code == 0:
         lines.append("结论: 每个文件的解码都真的执行并通过。")
     elif code == 2:
         lines.append("结论: 有文件解码失败；这不是能力缺失，是内容没读通。")
     elif code == _EXIT_INCOMPLETE:
-        lines.append("结论: 没有全部解码通过——原因见上面的「解码」维度（未请求/能力不可用/超限/取消）。")
+        lines.append(
+            "结论: 没有全部解码通过——原因见上面的「解码」与「路径稳定」维度"
+            "（未请求/能力不可用/超限/取消/检查期间被改动）。"
+        )
     return lines
 
 

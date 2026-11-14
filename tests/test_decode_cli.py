@@ -107,3 +107,48 @@ def test_an_unmeasured_receipt_reads_as_unknown_not_as_none(tmp_path, capsys):
     assert code == 5
     assert "解码收据: 未知 帧 未知 像素 用时 未知" in printed
     assert "None" not in printed
+
+
+def _report(state="ok", stability="unchanged", reason=None):
+    return {
+        "path": "x.png",
+        "quality": {"structure": {"state": state}, "decode": {"state": state}, "pages": {}},
+        "path_stability": stability,
+        "path_stability_reason": reason,
+        "receipt": None,
+        "unchanged": True,
+    }
+
+
+def test_a_verdict_only_counts_when_the_path_still_holds_the_same_bytes():
+    from core.library_maintenance import _decode_outcome
+
+    assert _decode_outcome([_report()]) == 0
+    assert _decode_outcome([_report(stability="changed")]) == 5
+    assert _decode_outcome([_report(stability="unknown")]) == 5
+
+
+def test_a_report_without_a_stability_field_is_not_a_pass():
+    from core.library_maintenance import _decode_outcome
+
+    report = _report()
+    report.pop("path_stability")
+    assert _decode_outcome([report]) == 5
+
+
+def test_the_words_say_unproven_rather_than_unchanged_when_no_hash_was_affordable():
+    from core.library_maintenance import _decode_lines
+
+    lines = _decode_lines([_report(stability="unknown", reason="hash_not_affordable")], 5)
+    printed = "\n".join(lines)
+    assert "路径稳定: 未证明（hash_not_affordable）" in printed
+    assert "字节未变: 未证明" in printed
+    assert "字节未变: 是" not in printed
+
+
+def test_a_changed_file_says_so_in_words():
+    from core.library_maintenance import _decode_lines
+
+    printed = "\n".join(_decode_lines([_report(stability="changed", reason="content_changed")], 5))
+    assert "路径稳定: 已变动（content_changed）" in printed
+    assert "字节未变: 否（内容已变）" in printed
