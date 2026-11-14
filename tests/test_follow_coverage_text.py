@@ -246,3 +246,64 @@ def test_no_none_scenario_ever_claims_the_run_finished():
     printed = text(coverage(counts=counts, consistent=False))
     for word in FORBIDDEN_WHEN_INCOMPLETE:
         assert word not in printed, word
+
+
+def conclusion_line(value):
+    """The last line, which is the only place allowed to pass a verdict."""
+    return render(value)[-1]
+
+
+def test_the_conclusion_names_only_the_dimension_that_failed():
+    printed = text(coverage(decision={"state": "unknown_fields", "reason": "favorite_unknown"}))
+    assert "结论: 以下未成立——筛选判定未完成或未应用；" in printed
+    assert "保存未齐" not in printed
+    assert "没有保存齐" not in printed
+
+
+def test_delivery_unknown_says_it_is_unproven_not_unsaved():
+    printed = text(coverage(delivery={"state": "unknown", "reason": "no_page_evidence"}))
+    assert "保存: 保存与核验未得证明（no_page_evidence）" in printed
+    assert "结论: 以下未成立——保存与核验未得证明；" in printed
+    assert "保存未齐" not in printed
+
+
+def test_everything_holding_still_ends_with_the_finished_sentence():
+    assert conclusion_line(coverage()) == "结论: 本轮范围已查完，保存已齐。"
+
+
+def test_the_blockers_are_listed_in_display_order():
+    value = coverage(
+        enumeration={"state": "partial", "reason": "artist_failed_pages"},
+        delivery={"state": "unknown", "reason": "no_page_evidence"},
+        consistent=False,
+        inconsistent_reasons=["confirmed+pending != checked"],
+    )
+    line = conclusion_line(value)
+    assert line.startswith("结论: 以下未成立——来源遍历未完成、保存与核验未得证明、计数不自洽；")
+    for word in FORBIDDEN_WHEN_INCOMPLETE:
+        assert word not in line, word
+
+
+def test_an_inconsistent_run_names_that_alone_when_every_dimension_holds():
+    line = conclusion_line(coverage(consistent=False))
+    assert "计数不自洽" in line
+    assert "来源遍历未完成" not in line
+    assert "保存未齐" not in line
+
+
+def test_no_incomplete_conclusion_uses_the_words_that_end_a_run():
+    cases = [
+        coverage(enumeration={"state": "partial", "reason": "x"}),
+        coverage(enumeration={"state": "stopped", "reason": "budget"}),
+        coverage(enumeration={"state": "failed", "reason": "error"}),
+        coverage(decision={"state": "unknown_fields", "reason": "x"}),
+        coverage(decision={"state": "skipped", "reason": "x"}),
+        coverage(delivery={"state": "unknown", "reason": "x"}),
+        coverage(delivery={"state": "partial", "reason": "x"}),
+        coverage(delivery={"state": "missing", "reason": "x"}),
+        coverage(consistent=False),
+    ]
+    for value in cases:
+        printed = text(value)
+        for word in FORBIDDEN_WHEN_INCOMPLETE:
+            assert word not in printed, (word, printed)
