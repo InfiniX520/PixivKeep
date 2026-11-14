@@ -197,6 +197,10 @@ class CollectionController:
         self._verify_next = None
         self._verify_scope_total = None
         self._verify_read_revision = None
+        # The header is a read too: keeping the old counts on screen while a
+        # new read is in flight is exactly the stale fact this generation is
+        # meant to end, even though the counts are not clickable.
+        self._verify_summary = {}
         self._verify_summary_revision = None
         self._verify_state = 'idle'
         self._verify_error_text = ''
