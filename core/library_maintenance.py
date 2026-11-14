@@ -2665,9 +2665,20 @@ def _decode_lines(reports: list[dict[str, object]], code: int) -> list[str]:
             lines.append("  %s: %s%s" % (label, entry.get("state"), ("（%s）" % reason) if reason else ""))
         if item.get("receipt"):
             receipt = item["receipt"]
+            # A receipt may say "not measured" (None) now that the receipt type
+            # stopped writing zeros for it.  Printing the Python literal "None"
+            # would be worse than saying so in words: a reader cannot tell
+            # "None" from a broken format string.
+            frames = receipt.get("frames")
+            pixels = receipt.get("pixels")
+            seconds = receipt.get("seconds")
             lines.append(
-                "  解码收据: %s 帧 %s 像素 用时 %ss"
-                % (receipt.get("frames"), receipt.get("pixels"), receipt.get("seconds"))
+                "  解码收据: %s 帧 %s 像素 用时 %s"
+                % (
+                    "未知" if frames is None else frames,
+                    "未知" if pixels is None else pixels,
+                    "未知" if seconds is None else "%ss" % (seconds,),
+                )
             )
         lines.append("  字节未变: %s" % ("是" if item.get("unchanged") else "否"))
     if code == 0:

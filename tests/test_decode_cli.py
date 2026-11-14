@@ -93,3 +93,17 @@ def test_an_explicit_limit_that_can_be_honoured_still_runs(tmp_path, capsys):
     printed = capsys.readouterr().out
     assert code == 0
     assert "解码: ok" in printed
+
+
+def test_an_unmeasured_receipt_reads_as_unknown_not_as_none(tmp_path, capsys):
+    """The receipt type stopped writing zeros for "not measured".
+
+    The text mode has to follow: printing the Python literal None would look
+    like a formatting bug, and printing 0 would be a lie.
+    """
+    path = _write(tmp_path, "tiny.gif", samples.build_minimal_gif())
+    code = main(["decode-check", str(path)])
+    printed = capsys.readouterr().out
+    assert code == 5
+    assert "解码收据: 未知 帧 未知 像素 用时 未知" in printed
+    assert "None" not in printed
