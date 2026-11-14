@@ -13,6 +13,15 @@ the caller says it just created.  discard() removes only those members, only
 while they still describe the same object, and never walks into a reparse
 point.  Anything else stays on disk and is reported.
 
+Two rules follow from that, and both are about evidence rather than trust:
+
+* A member whose identity the volume cannot report is never deleted.  It is
+  kept, with reason identity_unavailable, even when its size and time differ
+  from the record: a half-written member may be removed only once its object
+  is proven, and a name plus a guess is not proof.
+* A directory whose own identity cannot be reported has none of its members
+  touched at all; the whole workspace is kept and named.
+
 The module deliberately has no knowledge of libraries, manifests or SQLite: it
 only answers "is this still the thing I created".
 """
@@ -52,6 +61,18 @@ def _key(info: os.stat_result) -> tuple[int, int]:
     return (int(getattr(info, "st_dev", 0) or 0), int(getattr(info, "st_ino", 0) or 0))
 
 
+def key_available(key: tuple[int, int]) -> bool:
+    """True only when the platform really reported an identity.
+
+    A zero device or inode is not 'the same file': it is 'this volume did not
+    say'.  Treating it as an identity would let any file with the same name look
+    like the one this run created, which is exactly the guess the cleanup must
+    not make.  Members whose identity is unavailable are therefore never
+    deleted, and a directory in that state has none of its members touched.
+    """
+    return key[0] != 0 and key[1] != 0
+
+
 @dataclass(frozen=True)
 class _Member:
     name: str
@@ -59,6 +80,7 @@ class _Member:
     key: tuple[int, int]
     size: int
     mtime_ns: int
+    provable: bool
 
 
 def _same(member: _Member, info: os.stat_result) -> bool:
@@ -76,6 +98,7 @@ class TemporaryWorkspace:
         self.path = path
         self.purpose = purpose
         self._key = key
+        self._key_provable = key_available(key)
         self._members: dict[str, _Member] = {}
 
     @classmethod
@@ -108,7 +131,7 @@ class TemporaryWorkspace:
             info = os.lstat(target)
         except OSError:
             return
-        if is_reparse_point(info) or _key(info) != member.key:
+        if not member.provable or is_reparse_point(info) or _key(info) != member.key:
             return
         try:
             os.unlink(target)
@@ -136,12 +159,14 @@ class TemporaryWorkspace:
             info = os.fstat(handle)
         finally:
             os.close(handle)
+        key = _key(info)
         self._members[name] = _Member(
             name=name,
             kind=kind,
-            key=_key(info),
+            key=key,
             size=int(info.st_size),
             mtime_ns=int(getattr(info, "st_mtime_ns", 0) or 0),
+            provable=key_available(key),
         )
         return target
 
@@ -168,12 +193,14 @@ class TemporaryWorkspace:
             raise WorkspaceError(
                 "workspace_member_unreadable: %s (%s)" % (target, error)
             ) from None
+        key = _key(info)
         self._members[name] = _Member(
             name=name,
             kind="dir" if stat.S_ISDIR(info.st_mode) and not is_reparse_point(info) else kind,
-            key=_key(info),
+            key=key,
             size=int(info.st_size),
             mtime_ns=int(getattr(info, "st_mtime_ns", 0) or 0),
+            provable=key_available(key),
         )
         return True
 
@@ -211,6 +238,12 @@ class TemporaryWorkspace:
             errors.append("directory_unreadable: %s" % error)
             result["state"] = "failed"
             return result
+        if not self._key_provable:
+            # The volume did not report an identity for this directory, so no
+            # member can be shown to belong to this run.  Nothing is touched.
+            kept.append({"name": ".", "reason": "identity_unavailable"})
+            result["state"] = "kept"
+            return result
         if is_reparse_point(current) or _key(current) != self._key:
             kept.append({"name": ".", "reason": "directory_replaced"})
             result["state"] = "kept"
@@ -226,6 +259,14 @@ class TemporaryWorkspace:
             except OSError as error:
                 kept.append({"name": name, "reason": "unreadable"})
                 errors.append("%s: %s" % (name, error))
+                continue
+            if not member.provable:
+                # No identity was recorded when this member was created, so
+                # nothing can prove the file under that name is the one this
+                # run made.  A half-written member stays for the same reason:
+                # 'size and time differ' is only evidence *after* the object
+                # itself is proven.
+                kept.append({"name": name, "reason": "identity_unavailable"})
                 continue
             if is_reparse_point(info):
                 kept.append({"name": name, "reason": "reparse"})

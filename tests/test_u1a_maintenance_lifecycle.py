@@ -424,3 +424,64 @@ def test_an_interrupt_during_cleanup_keeps_its_own_type(tmp_path, monkeypatch):
     monkeypatch.setattr(m, "_discard", interrupting)
     with pytest.raises(KeyboardInterrupt):
         m.backup_library(source, tmp_path / "backups", label="interrupted")
+
+
+class _NoIdentity:
+    """A stat result from a volume that reports no file identity."""
+
+    def __init__(self, real):
+        self.st_dev = 0
+        self.st_ino = 0
+        self.st_mode = real.st_mode
+        self.st_file_attributes = getattr(real, "st_file_attributes", 0)
+        self.st_size = real.st_size
+        self.st_mtime_ns = real.st_mtime_ns
+
+
+def test_a_member_without_a_reported_identity_is_never_deleted(tmp_path, monkeypatch):
+    root = tmp_path / "run"
+    root.mkdir()
+    workspace = TemporaryWorkspace.adopt(root, purpose="test")
+    real_fstat = os.fstat
+    calls = {"n": 0}
+
+    def anonymous_once(fd):
+        calls["n"] += 1
+        info = real_fstat(fd)
+        return _NoIdentity(info) if calls["n"] == 1 else info
+
+    monkeypatch.setattr(os, "fstat", anonymous_once)
+    opaque = workspace.claim("opaque.bin")
+    opaque.write_bytes(b"written while the volume would not say which file this is")
+    monkeypatch.setattr(os, "fstat", real_fstat)
+    plain = workspace.claim("plain.bin")
+    plain.write_bytes(b"plain")
+    cleanup = workspace.discard()
+    assert {"name": "opaque.bin", "reason": "identity_unavailable"} in cleanup["kept"]
+    assert cleanup["removed"] == ["plain.bin"]
+    assert cleanup["state"] != "ok"
+    assert opaque.exists() and opaque.stat().st_size > 0
+    assert not plain.exists()
+
+
+def test_a_directory_without_a_reported_identity_is_left_alone(tmp_path, monkeypatch):
+    root = tmp_path / "run"
+    root.mkdir()
+    real_lstat = os.lstat
+    calls = {"n": 0}
+
+    def anonymous_once(path, *args, **kwargs):
+        calls["n"] += 1
+        info = real_lstat(path, *args, **kwargs)
+        return _NoIdentity(info) if calls["n"] == 1 else info
+
+    monkeypatch.setattr(os, "lstat", anonymous_once)
+    workspace = TemporaryWorkspace.adopt(root, purpose="test")
+    monkeypatch.setattr(os, "lstat", real_lstat)
+    (root / "mine.bin").write_bytes(b"mine")
+    workspace.record("mine.bin")
+    cleanup = workspace.discard()
+    assert cleanup["state"] == "kept"
+    assert cleanup["removed"] == []
+    assert cleanup["kept"] == [{"name": ".", "reason": "identity_unavailable"}]
+    assert (root / "mine.bin").exists()
