@@ -40,6 +40,16 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
+def _measured(value: object) -> int | None:
+    """A reported measurement, or None when the decoder produced none.
+
+    `int(x or 0)` used to turn an unknown pixel count into 0, which reads as
+    "measured zero pixels" instead of "nobody counted".  A real zero still
+    survives: a decoder that ran and decoded no frame reports 0.
+    """
+    return value if type(value) is int and value >= 0 else None
+
+
 def _limits(value: object) -> DecodeLimits:
     if value is None:
         return DEFAULT_LIMITS
@@ -79,15 +89,34 @@ def _decode(path: Path, media_type: str | None, structure_state: str, *,
         return Dimension("undecided", "structure_not_ok"), None
     if media_type == "image/png":
         started = time.perf_counter()
-        with path.open("rb") as stream:
-            result = decode_png(stream, limits=limits, stop=stop)
+        try:
+            with path.open("rb") as stream:
+                result = decode_png(stream, limits=limits, stop=stop)
+        except OSError as error:
+            # The file moved between the structure question and this open: an
+            # unreadable artifact, not a crash, and nothing was measured.
+            return Dimension("failed", "unreadable:%s" % type(error).__name__), DecodeReceipt(
+                format="png",
+                frames=None,
+                pixels=None,
+                limits=limits.as_dict(),
+                decoder="stdlib-zlib-png",
+                outcome="failed",
+                seconds=None,
+                checked_at=_now(),
+            )
         state = str(result.get("state") or "undecided")
         if state not in {"ok", "failed", "undecided"}:
             state = "undecided"
+        # frames/pixels describe what the decoder actually produced.  A stopped
+        # or failed decode produced nothing to count, so the honest value is
+        # None; the header-derived pixel count png_decode can compute is the
+        # size of the image, not evidence that any of it was decoded.
+        decoded = state == "ok"
         receipt = DecodeReceipt(
             format="png",
-            frames=int(result.get("frames") or 0),
-            pixels=int(result.get("pixels") or 0),
+            frames=_measured(result.get("frames")) if decoded else None,
+            pixels=_measured(result.get("pixels")) if decoded else None,
             limits=limits.as_dict(),
             decoder="stdlib-zlib-png",
             outcome=state,
@@ -98,14 +127,16 @@ def _decode(path: Path, media_type: str | None, structure_state: str, *,
     outcome = decode_with(probe_decoder(), path, policy="strict", limits=limits, stop=stop)
     receipt = DecodeReceipt(
         format=str(media_type or "unknown"),
-        frames=0,
-        pixels=0,
+        # No decoder ran, so there is no frame count, no pixel count and no
+        # duration to report: None says that, 0 would claim a measurement.
+        frames=None,
+        pixels=None,
         limits=limits.as_dict(),
         # C4 reports None when nothing is installed; the receipt still has to
         # say something readable, and "none" is the honest word for it.
         decoder=outcome.decoder or "none",
         outcome=outcome.decode,
-        seconds=0.0,
+        seconds=None,
         checked_at=_now(),
     )
     return Dimension(outcome.decode, outcome.reason), receipt
@@ -141,7 +172,23 @@ def quality_evidence(path, *, decode_policy: str = "structure", limits=None, sto
         limits=budget,
         stop=stop,
     )
-    transport = Dimension("length_matched") if expected_size is not None else Dimension("unknown", "no_expected_size")
+    transport = (
+        Dimension("length_matched")
+        if expected_size is not None
+        else Dimension("unknown", "no_expected_size")
+    )
+    size = getattr(evidence, "size", None)
+    if size is None:
+        try:
+            size = target.stat().st_size
+        except OSError:
+            # A vanished or unreadable artifact leaves the size unknown; the
+            # structure dimension already records why.  Never raise here: a
+            # missing file is a fact about the artifact, not a broken caller.
+            size = None
+    else:
+        size = int(size)
+
     quality = QualityEvidence(
         source=Dimension("unknown", "provenance_not_observed"),
         transport=transport,
@@ -153,7 +200,7 @@ def quality_evidence(path, *, decode_policy: str = "structure", limits=None, sto
         "path": str(target),
         "decode_policy": decode_policy,
         "media_type": getattr(evidence, "media_type", None),
-        "size": int(getattr(evidence, "size", target.stat().st_size)),
+        "size": size,
         "sha256": getattr(evidence, "sha256", None),
         "width": getattr(evidence, "width", None),
         "height": getattr(evidence, "height", None),
