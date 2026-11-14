@@ -217,6 +217,44 @@ class Batch:
             "fingerprint": self.fingerprint(),
         }
 
+    @classmethod
+    def from_dict(cls, value: object) -> "Batch":
+        """Rebuild a batch from as_dict(), refusing a dump that does not match.
+
+        The fingerprint travels in the dump so a hand-edited file cannot pass
+        as the batch it claims to be: a present-but-different fingerprint is a
+        refusal here, not something to silently recompute and forget.
+        """
+        if not isinstance(value, Mapping):
+            raise BatchError("batch_not_a_mapping", type(value).__name__)
+        required = (
+            "batch_id",
+            "account_id",
+            "created_at",
+            "scope",
+            "policy",
+            "steps",
+            "status",
+            "stop_reason",
+        )
+        missing = [key for key in required if key not in value]
+        if missing:
+            raise BatchError("batch_field_missing", ",".join(missing))
+        batch = cls(
+            batch_id=value["batch_id"],
+            account_id=value["account_id"],
+            created_at=value["created_at"],
+            scope=value["scope"],
+            policy=value["policy"],
+            steps=value["steps"],
+            status=value["status"],
+            stop_reason=value["stop_reason"],
+        )
+        claimed = value.get("fingerprint")
+        if claimed is not None and claimed != batch.fingerprint():
+            raise BatchError("batch_fingerprint_mismatch", claimed)
+        return batch
+
 
 def _capacity(*, cap: int, requests: int, bytes_budget: int, seconds: float,
               cost: ArtistCost):

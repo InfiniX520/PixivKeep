@@ -19,8 +19,8 @@ import sys
 from pathlib import Path
 
 from organizer.common import OrganizerError
-from organizer.batches import BatchError, plan_batch
-from organizer.group_scope import AmbiguousGroupError, build_scope
+from organizer.batches import Batch, BatchError, plan_batch
+from organizer.group_scope import AmbiguousGroupError, GroupScope, build_scope
 
 EXIT_OK = 0
 EXIT_REFUSED = 3
@@ -183,12 +183,26 @@ def _report_engine():
     return getattr(module, "build_report", None)
 
 
+def _rehydrate_batch(payload):
+    """A dumped batch becomes a Batch again, or the input is refused by name."""
+    try:
+        return Batch.from_dict(payload)
+    except BatchError as error:
+        raise OfflineRefusal("batch_invalid:" + error.code, error.detail or "") from None
+
+
+def _rehydrate_scope(payload):
+    """A dumped scope becomes a GroupScope again, fingerprint re-derived."""
+    try:
+        return GroupScope.from_dict(payload)
+    except OrganizerError as error:
+        raise OfflineRefusal(getattr(error, "code", "scope_invalid"), "") from None
+
+
 def cmd_batch_report(args):
-    batch = _load(args.batch, "batch")
+    batch = _rehydrate_batch(_load(args.batch, "batch"))
+    scope = _rehydrate_scope(_load(args.scope, "scope"))
     decisions = _load(args.decisions, "decisions")
-    scope = _load(args.scope, "scope")
-    if not isinstance(batch, dict) or not isinstance(scope, dict):
-        raise OfflineRefusal("report_input_shape_invalid", "batch and scope must be objects")
     if not isinstance(decisions, list):
         raise OfflineRefusal("report_input_shape_invalid", "decisions must be a list")
     builder = _report_engine()
@@ -207,10 +221,14 @@ def cmd_batch_report(args):
         raise OfflineRefusal(getattr(error, "code", "report_refused"), error) from None
     data = _json_safe(report)
     lines = _report_lines(data)
-    unproven = scope.get("completeness") != "complete" or bool(data.get("unknowns"))
-    return {"command": "batch-report", "report": data}, lines, (
-        EXIT_UNPROVEN if unproven else EXIT_OK
-    )
+    unproven = scope.completeness != "complete" or bool(data.get("unknowns"))
+    payload = {
+        "command": "batch-report",
+        "report": data,
+        "batch": batch.as_dict(),
+        "scope": scope.as_dict(),
+    }
+    return payload, lines, (EXIT_UNPROVEN if unproven else EXIT_OK)
 
 
 def _report_lines(data):

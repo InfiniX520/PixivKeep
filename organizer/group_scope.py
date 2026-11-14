@@ -177,7 +177,12 @@ class GroupScope:
         self.source = MappingProxyType(dict(source))
         self.completeness = completeness
         self.unknown_reason = unknown_reason
-        self.fingerprint = _fingerprint(tuple(sides), tuple(blocks))
+        # The identity inputs are kept so as_dict()/from_dict() can carry them:
+        # a round trip that dropped them could not re-derive the fingerprint and
+        # would have to trust whatever the file claimed.
+        self.sides = tuple(sides)
+        self.blocks = tuple((str(side), tuple(ids)) for side, ids in blocks)
+        self.fingerprint = _fingerprint(self.sides, self.blocks)
 
     @property
     def complete(self):
@@ -196,11 +201,55 @@ class GroupScope:
             "group_pairs": [list(pair) for pair in self.group_pairs],
             "artist_ids": list(self.artist_ids),
             "overlap": {key: list(value) for key, value in self.overlap.items()},
+            "sides": list(self.sides),
+            "blocks": [[side, list(ids)] for side, ids in self.blocks],
             "source": dict(self.source),
             "completeness": self.completeness,
             "unknown_reason": self.unknown_reason,
             "fingerprint": self.fingerprint,
         }
+
+    @classmethod
+    def from_dict(cls, value):
+        """Rebuild a scope from as_dict(), refusing a dump that does not match.
+
+        The member blocks travel with the dump, so the fingerprint is re-derived
+        here instead of trusted: a file whose members were edited after the fact
+        fails with scope_fingerprint_mismatch rather than becoming a scope.
+        """
+        if not isinstance(value, Mapping):
+            raise OrganizerError("scope_not_a_mapping")
+        required = (
+            "kind",
+            "snapshot_id",
+            "group_pairs",
+            "artist_ids",
+            "sides",
+            "blocks",
+            "overlap",
+            "source",
+            "completeness",
+            "unknown_reason",
+        )
+        missing = [key for key in required if key not in value]
+        if missing:
+            raise OrganizerError("scope_field_missing:" + ",".join(missing))
+        scope = cls(
+            kind=value["kind"],
+            snapshot_id=value["snapshot_id"],
+            group_pairs=[tuple(pair) for pair in value["group_pairs"]],
+            artist_ids=tuple(value["artist_ids"]),
+            sides=tuple(value["sides"]),
+            blocks=[(str(side), tuple(ids)) for side, ids in value["blocks"]],
+            overlap={key: tuple(ids) for key, ids in dict(value["overlap"]).items()},
+            source=dict(value["source"]),
+            completeness=value["completeness"],
+            unknown_reason=value["unknown_reason"],
+        )
+        claimed = value.get("fingerprint")
+        if claimed is not None and claimed != scope.fingerprint:
+            raise OrganizerError("scope_fingerprint_mismatch")
+        return scope
 
     def __eq__(self, other):
         if not isinstance(other, GroupScope):
