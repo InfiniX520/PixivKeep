@@ -98,10 +98,22 @@ def identity_components(before, after, path_info):
     very bytes that were hashed; path_info comes from a fresh os.lstat and is
     the only thing that can say the name still points at that file.
 
-    The composition is deliberate: a handle that moved is changed even when the
-    path could not be read, and a path that could not be read is unknown even
-    when the handle looked perfect.  Nothing here returns the same value for
-    "matched" and "no evidence".
+    The composition is deliberate and ordered:
+
+    * content moved while reading        -> changed
+    * the handle moved                  -> changed (even if the path is unknown)
+    * the path is measurable and differs from the handle after the read
+                                        -> changed (even if the first handle
+                                           measurement was unknown: a conflict
+                                           is evidence and outranks an unknown)
+    * anything still unknown, or a handle that is not ok while the name agrees
+                                        -> unknown (the name is not proven by a
+                                           handle that could not be vouched for)
+    * otherwise                         -> ok
+
+    A path can only be "unknown" when there is no comparable pair at all, so
+    an unknown never hides a conflict and never stands in for agreement.
+    Nothing here returns the same value for "matched" and "no evidence".
     """
     size_ok = int(before.st_size) == int(after.st_size)
     time_ok = mtime_ns(before) == mtime_ns(after)
@@ -127,27 +139,30 @@ def identity_components(before, after, path_info):
     else:
         handle, handle_reason = "ok", None
 
-    if handle != "ok":
-        # A path can never be bound to a handle whose own identity is unknown,
-        # and a handle that moved cannot be bound to the name either.
-        path, path_reason = "unknown", handle_reason
-    elif named_state["state"] != "ok":
-        path, path_reason = "unknown", "identity_unavailable:path_binding"
-    elif named != again:
+    if again_state["state"] == "ok" and named_state["state"] == "ok" and named != again:
+        # Both sides are measurable and disagree: the name does not carry the
+        # object that was hashed.  This is a fact even when the *first* handle
+        # measurement was unreadable, so a known conflict outranks that unknown.
         path, path_reason = "changed", "path_replaced_during_hash"
-    else:
+    elif handle == "ok" and named_state["state"] == "ok":
         path, path_reason = "ok", None
+    else:
+        # No proven binding: either side could be unmeasurable, or the handle
+        # itself was not stable, so there is no clean pair to vouch for the name.
+        path, path_reason = "unknown", "identity_unavailable:path_binding"
 
     if content == "changed":
         identity, reason = "changed", content_reason
     elif handle == "changed":
         identity, reason = "changed", handle_reason
+    elif path == "changed":
+        # A known conflict outranks an unknown: it is evidence, and hiding it
+        # behind "we could not measure the other side" would lose the fact.
+        identity, reason = "changed", path_reason
     elif handle == "unknown":
         identity, reason = "unknown", handle_reason
     elif path == "unknown":
         identity, reason = "unknown", path_reason
-    elif path == "changed":
-        identity, reason = "changed", path_reason
     else:
         identity, reason = "ok", None
     return {"content": content, "content_reason": content_reason,

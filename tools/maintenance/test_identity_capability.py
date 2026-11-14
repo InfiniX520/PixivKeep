@@ -367,6 +367,46 @@ def test_a_known_handle_change_beats_an_unknown_path():
         assert record["identity_reason"] == "identity_changed_during_hash"
 
 
+def test_a_known_path_conflict_survives_an_unknown_handle():
+    """A conflict is evidence: it outranks the other side being unmeasurable."""
+    with synthetic("conflict_over_unknown") as root:
+        target = root / "page.bin"
+        target.write_bytes(b"conflict bytes")
+        real_fstat = os.fstat
+        fstat, calls = _counting_fstat(real_fstat, first=without_identity)
+        lstat, _lstat_calls = _counting_lstat(
+            second=lambda info: variant(info, st_ino=info.st_ino + 1)
+        )
+        with mock.patch.object(archive.os, "fstat", fstat), \
+                mock.patch.object(archive, "lstat_of", lstat):
+            record = archive.file_record(target, hashes=True)
+        print(json.dumps({"case": "conflict_over_unknown", "calls": calls["count"],
+                          "record": record}, ensure_ascii=False))
+        assert calls["count"] == 2
+        assert record["handle_identity"] == "unknown"
+        assert record["path_binding"] == "changed", record
+        assert record["identity"] == "changed", record
+        assert record["identity_reason"] == "path_replaced_during_hash"
+
+
+def test_an_unknown_final_handle_leaves_the_path_unknown():
+    """With no measurable handle after the read there is nothing to compare."""
+    with synthetic("no_comparable_pair") as root:
+        target = root / "page.bin"
+        target.write_bytes(b"no comparable bytes")
+        real_fstat = os.fstat
+        fstat, calls = _counting_fstat(real_fstat, second=without_identity)
+        with mock.patch.object(archive.os, "fstat", fstat):
+            record = archive.file_record(target, hashes=True)
+        print(json.dumps({"case": "no_comparable_pair", "calls": calls["count"],
+                          "record": record}, ensure_ascii=False))
+        assert calls["count"] == 2
+        assert record["handle_identity"] == "unknown"
+        assert record["path_binding"] == "unknown", record
+        assert record["identity"] == "unknown", record
+        assert record["identity_reason"].startswith("identity_unavailable:")
+
+
 def test_cross_volume_identity_change_is_changed():
     """A volume change is a changed identity; a real cross-volume move is untested."""
     with synthetic("cross_volume") as root:
