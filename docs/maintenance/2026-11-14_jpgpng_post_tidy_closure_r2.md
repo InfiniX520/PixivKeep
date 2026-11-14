@@ -74,6 +74,19 @@
 | P3-8 | 同一句注释重复两行 | 已修 |
 
 复审自己跑的数字：251 项全绿（closure 14、lifecycle 24、backup 26、restore 6、walk 52、panel 86、post-tidy 10、w5w6 12、tools 21），并独立核过真实备份 `verify` 与库 `sha256`。
+
+### 6.1 增量复审（e5ab12d..e1da73a）
+
+复核上述 2 P2 + 8 P3 的修复本身：**P1 = 0、P2 = 0**，判「可以合并进候选」，并另列 4 项小 P3，已全部修（`59f74c4`）：
+
+| 项 | 内容 | 处理 |
+| --- | --- | --- |
+| a | `docs/README.md` 页首仍写 2,321/2,287，与记录矛盾 | 已改为 2,329/2,295 |
+| b | `restore_check` 里 `if not wal_readable` 分支不可达（前面已 return） | 已删除并留一行注释 |
+| c | 成功的 verify 也带 `"status": null`，消费者可能误读成错误 | 已改为只在 `exit_code == 3` 时写 `status`；真实备份实测 `ok=True / exit_code=0 / has_status=False / cleanup=ok` |
+| d | `release()` 先 pop 后 unlink，unlink 失败时成员失去登记 → 之后被当陌生项 | 已改为 unlink 成功后再 pop；失败保留登记，仍按半成品报告 |
+
+增量复审自己跑的数字：closure 14、lifecycle 29、tools 23、panel 89 全绿，`pytest tests --collect-only` 得 2,295，与记录一致。
 ## 7. 明确未做与风险
 
 - **Tk 拆除稳定性（既有 P2）未闭环**：本轮只攒了数据（见 §7），没有根因结论。

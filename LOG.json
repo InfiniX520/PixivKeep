@@ -2298,7 +2298,12 @@
       "read_only_audit": {
         "p1": 0,
         "p2_fixed": 2,
-        "p3_fixed": 8
+        "p3_fixed": 8,
+        "delta_audit": {
+          "p1": 0,
+          "p2": 0,
+          "p3_fixed": 4
+        }
       }
     }
   ]

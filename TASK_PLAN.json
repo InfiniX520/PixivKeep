@@ -361,7 +361,7 @@
       "latest_overview": "docs/audits/2026-11-14-post-tidy-closure/README.md",
       "latest_evidence": "docs/maintenance/2026-11-14_jpgpng_post_tidy_closure_r2.md",
       "audited_commit": "9ee62068273324848a83061662d86ce9da46876c",
-      "fixed_commit": "f09d88f",
+      "fixed_commit": "59f74c4",
       "runtime_checkout_note": "Daily branch remains daily/u1a-w5-w6-20261114 at 4ba891e until the user switches. This round changed product code on fix/a1-post-tidy-r2-20261114 only: no deployment, no database restore, real library read-only. Restore gate is maintain.cmd verify <backup dir>; compare is not a gate."
     },
     "archiving_design": {
@@ -1499,7 +1499,12 @@
       "read_only_audit": {
         "p1": 0,
         "p2_fixed": 2,
-        "p3_fixed": 8
+        "p3_fixed": 8,
+        "delta_audit": {
+          "p1": 0,
+          "p2": 0,
+          "p3_fixed": 4
+        }
       }
     }
   }
