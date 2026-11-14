@@ -2478,6 +2478,25 @@ def _parser() -> argparse.ArgumentParser:
     decode.add_argument("--max-pixels", type=int, default=None, help="单文件像素上限")
     decode.add_argument("--max-bytes", type=int, default=None, help="单文件字节上限")
     decode.add_argument("--max-seconds", type=float, default=None, help="单文件解码秒数上限")
+    coverage = commands.add_parser(
+        "coverage", parents=[_COMMON],
+        help="只读汇总一次关注遍历的覆盖情况（不写库、不推进游标、不改断点）",
+    )
+    coverage.add_argument(
+        "--database", type=Path, required=True, help="关注运行状态库（以只读方式打开）"
+    )
+    coverage.add_argument("--run", required=True, help="要汇总的 run_id")
+    explain_report = commands.add_parser(
+        "filter-explain", parents=[_COMMON],
+        help="只读解释每个候选为什么被排除、为什么判不了（不发请求、不读图库）",
+    )
+    explain_report.add_argument(
+        "--candidates", type=Path, required=True, help="候选 JSONL：每行一个对象"
+    )
+    explain_report.add_argument(
+        "--conditions", type=Path, required=True,
+        help="条件 JSON：{min_bookmarks: int|null, exclude_ai: bool}",
+    )
     scan = commands.add_parser(
         "scan", parents=[_COMMON], help="只读巡检已交付的文件是否还和记录一致"
     )
@@ -3172,6 +3191,37 @@ def main(argv: list[str] | None = None) -> int:
             }
             _emit(payload, as_json, _decode_lines(reports, code))
             return code
+        if arguments.command in {"coverage", "filter-explain"}:
+            from core.report_commands import (
+                ReportError,
+                coverage_lines,
+                coverage_report,
+                error_payload,
+                filter_explain_lines,
+                filter_explain_report,
+            )
+
+            # Both commands answer with a conclusion, so 3 is "we could not even
+            # read the input" and never a stand-in for "we are not sure".
+            try:
+                if arguments.command == "coverage":
+                    report = coverage_report(arguments.database, arguments.run)
+                    lines = coverage_lines(report)
+                else:
+                    report = filter_explain_report(arguments.candidates, arguments.conditions)
+                    lines = filter_explain_lines(report)
+            except ReportError as error:
+                if as_json:
+                    print(json.dumps(error_payload(error), ensure_ascii=False, indent=2))
+                else:
+                    print(
+                        "失败: %s%s"
+                        % (error.code, (" " + error.detail) if error.detail else ""),
+                        file=sys.stderr,
+                    )
+                return 3
+            _emit(report, as_json, lines)
+            return int(report["exit_code"])
         if arguments.command == "restore-check":
             report = restore_check(arguments.database)
             _emit(report, as_json, _restore_lines(report))
