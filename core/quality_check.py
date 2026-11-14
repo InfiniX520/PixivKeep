@@ -187,21 +187,26 @@ def _pages(evidence, decode_state: str) -> Dimension:
 def _transport(expected_size, observed_size, observe_error) -> Dimension:
     """Length evidence: a comparison, never a restatement of the expectation.
 
-    The state vocabulary of this dimension is frozen at
-    ("length_matched", "unknown"), so the finer answer lives in the reason,
-    which is the machine-readable field the CLI prints.  Only an equality
-    observed in this run may say length_matched.
+    Four states, each saying something different:
+
+        length_matched   expected == observed, both known, compared here
+        length_mismatch  expected and observed are both known and differ
+        length_unknown   there was no usable expectation to compare against
+        unreadable       the artifact could not be observed at all
+
+    Only an equality observed in this run may say length_matched; a mismatch is
+    a known fact and must not be softened into "unknown".
     """
     if observed_size is None:
-        return Dimension("unknown", "unreadable:%s" % (observe_error or "unknown"))
+        return Dimension("unreadable", "unreadable:%s" % (observe_error or "unknown"))
     if expected_size is None:
-        return Dimension("unknown", "length_unknown:no_expected_size")
+        return Dimension("length_unknown", "no_expected_size")
     if type(expected_size) is not int or expected_size <= 0:
-        return Dimension("unknown", "length_unknown:invalid_expected_size")
+        return Dimension("length_unknown", "invalid_expected_size")
     if int(expected_size) == int(observed_size):
         return Dimension("length_matched", "expected_equals_observed")
     return Dimension(
-        "unknown", "length_mismatch:expected_%d_observed_%d" % (expected_size, observed_size)
+        "length_mismatch", "expected_%d_observed_%d" % (expected_size, observed_size)
     )
 
 

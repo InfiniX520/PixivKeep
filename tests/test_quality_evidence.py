@@ -115,7 +115,7 @@ def test_capability_unavailable_is_a_decode_answer_and_never_ok():
 
 
 def test_the_five_dimensions_are_not_folded_into_one_boolean():
-    record = evidence(transport="unknown", decode="undecided")
+    record = evidence(transport="length_unknown", decode="undecided")
     for collapsed in ("ok", "passed", "verified", "is_ok", "all_ok", "verdict"):
         assert not hasattr(record, collapsed), collapsed
     payload = record.as_dict()
@@ -221,5 +221,10 @@ def test_a_receipt_from_dict_refuses_a_missing_field():
 def test_the_module_reports_the_same_vocabulary_the_design_freezes():
     assert QUALITY_STATES["structure"] == ("ok", "failed", "undecided", "unsupported")
     assert QUALITY_STATES["pages"] == ("all_frames", "first_frame_only", "unknown")
-    assert QUALITY_STATES["transport"] == ("length_matched", "unknown")
+    assert QUALITY_STATES["transport"] == (
+        "length_matched",
+        "length_mismatch",
+        "length_unknown",
+        "unreadable",
+    )
     assert QUALITY_STATES["source"] == ("declared_original", "unknown")

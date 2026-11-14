@@ -40,7 +40,10 @@ __all__ = [
 #: programming error, not a runtime surprise, so construction refuses it.
 QUALITY_STATES: dict[str, tuple[str, ...]] = {
     "source": ("declared_original", "unknown"),
-    "transport": ("length_matched", "unknown"),
+    # Four answers, not two: a length that was compared and did not match is a
+    # fact, and calling it "unknown" would downgrade a known mismatch into a
+    # shrug.  length_unknown is the state for "there was nothing to compare".
+    "transport": ("length_matched", "length_mismatch", "length_unknown", "unreadable"),
     "structure": ("ok", "failed", "undecided", "unsupported"),
     "decode": ("ok", "failed", "undecided", "capability_unavailable"),
     "pages": ("all_frames", "first_frame_only", "unknown"),

@@ -609,22 +609,44 @@ def test_a_metadata_change_alone_is_changed_too(tmp_path, monkeypatch):
     assert report["sha256_before"] == report["sha256_after"]
 
 
-def test_a_length_that_was_never_observed_is_not_matched(tmp_path):
+@pytest.mark.parametrize(
+    "case,expected,delta",
+    [
+        ("no expectation", None, 0),
+        ("exactly the observed size", "exact", 0),
+        ("one byte more", "exact", 1),
+        ("one byte less", "exact", -1),
+        ("unreadable path", "absent", 0),
+    ],
+)
+def test_every_length_answer_comes_from_a_comparison(tmp_path, case, expected, delta):
+    """Five inputs, four states, and only one of them may say length_matched."""
     path = write(tmp_path, "valid.png", _valid())
     size = path.stat().st_size
-    matched = quality_check.quality_evidence(path, expected_size=size)
-    assert matched["quality"]["transport"]["state"] == "length_matched"
-    short = quality_check.quality_evidence(path, expected_size=size - 1)
-    assert short["quality"]["transport"]["state"] == "unknown"
-    assert short["quality"]["transport"]["reason"].startswith("length_mismatch:")
-    absent = quality_check.quality_evidence(path)
-    assert absent["quality"]["transport"]["state"] == "unknown"
-    assert absent["quality"]["transport"]["reason"].startswith("length_unknown:")
+    if expected == "absent":
+        report = quality_check.quality_evidence(tmp_path / "absent.png")
+    elif expected is None:
+        report = quality_check.quality_evidence(path)
+    else:
+        report = quality_check.quality_evidence(path, expected_size=size + delta)
+    transport = report["quality"]["transport"]
+    wanted = {
+        ("no expectation", 0): "length_unknown",
+        ("exactly the observed size", 0): "length_matched",
+        ("one byte more", 1): "length_mismatch",
+        ("one byte less", -1): "length_mismatch",
+        ("unreadable path", 0): "unreadable",
+    }[(case, delta)]
+    assert transport["state"] == wanted, (case, transport)
+    if transport["state"] == "length_matched":
+        assert expected == "exact" and delta == 0
+    if transport["state"] == "length_mismatch":
+        assert ("expected_%d_observed_%d" % (size + delta, size)) == transport["reason"]
 
 
 def test_an_unreadable_path_has_no_length_evidence(tmp_path):
     report = quality_check.quality_evidence(tmp_path / "absent.png")
-    assert report["quality"]["transport"]["state"] == "unknown"
+    assert report["quality"]["transport"]["state"] == "unreadable"
     assert report["quality"]["transport"]["reason"].startswith("unreadable:")
     assert report["quality"]["structure"]["state"] == "failed"
     assert report["content_version"]["state"] == "unknown"
@@ -645,5 +667,5 @@ def test_a_wrong_expected_size_fails_the_structure_but_not_the_transport(tmp_pat
     size = path.stat().st_size
     report = quality_check.quality_evidence(path, expected_size=size + 1)
     assert report["quality"]["structure"]["reason"] == "image_size_mismatch"
-    assert report["quality"]["transport"]["state"] == "unknown"
-    assert report["quality"]["transport"]["reason"].startswith("length_mismatch:")
+    assert report["quality"]["transport"]["state"] == "length_mismatch"
+    assert report["quality"]["transport"]["reason"] == "expected_%d_observed_%d" % (size + 1, size)
