@@ -858,10 +858,14 @@ class CollectionController:
             self._verify_cursors = [None]
             self._verify_cursor = None
         # Whatever the previous generation put on screen stops being a fact the
-        # moment a new read starts: the rows go before the request does.
+        # moment a new read starts: the rows go before the request does, and
+        # both read revisions belong to the reads that just ended.  Keeping
+        # either would let the header compare a fresh read of one kind against
+        # a stale read of the other and invent a mismatch nobody measured.
         self._verify_next = None
         self._verify_scope_total = None
         self._verify_read_revision = None
+        self._verify_summary_revision = None
         self._verify_display = []
         self._verify_rows = {}
         self._verify_dropped = 0
@@ -1051,12 +1055,14 @@ class CollectionController:
             '读取待核验页面没有完成。请点“刷新”重试；若持续出现，请查看诊断日志。')
         if key == 'verification_summary':
             self._verify_summary = {}
+            self._verify_summary_revision = None
             self._verify_summary_error = '本批统计没有读出来，下面的列表可能不完整'
             self.view.set_verification_result(text, 'danger')
             self._render_verification()
             return
         self._verify_state = 'error'
         self._verify_error_text = text
+        self._verify_read_revision = None
         self._verify_rows = {}
         self._verify_display = []
         self._verify_dropped = 0

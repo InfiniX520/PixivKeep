@@ -1805,3 +1805,79 @@ def test_a_failure_from_an_older_generation_does_not_replace_the_page():
         scope=(controller._verification_epoch,
                controller._verification_generation, controller._current_batch))
     assert controller._verify_state == "error"
+
+
+def test_a_new_page_revision_is_not_compared_with_a_previous_summary_revision():
+    controller, view = _queued_controller()
+    _open_verify(controller)
+    _resolve(controller.runtime.pending["summary"][0],
+        {"batch_id": "batch-a", "counts": {}, "read_revision": 7})
+    _resolve(controller.runtime.pending["pages"][0],
+        _read_page([_row(batch="batch-a")], batch="batch-a", revision=7))
+    for _ in range(2):
+        controller._poll()
+    assert controller._verify_summary_revision == 7
+    assert controller._verify_read_revision == 7
+    assert "统计与列表不是同一次读取" not in view.named(
+        "set_verification_rows")[-1][2]["page_text"]
+
+    controller.handle("verification_refresh", {})
+    # The previous generation's revisions are not facts about the new read.
+    assert controller._verify_summary_revision is None
+    assert controller._verify_read_revision is None
+    _resolve(controller.runtime.pending["pages"][-1],
+        _read_page([_row(batch="batch-a")], batch="batch-a", revision=11))
+    for _ in range(2):
+        controller._poll()
+    assert "统计与列表不是同一次读取" not in view.named(
+        "set_verification_rows")[-1][2]["page_text"]
+
+    # Two reads of the same generation with different revisions still say so.
+    _resolve(controller.runtime.pending["summary"][-1],
+        {"batch_id": "batch-a", "counts": {}, "read_revision": 5})
+    for _ in range(2):
+        controller._poll()
+    assert "统计与列表不是同一次读取" in view.named(
+        "set_verification_rows")[-1][2]["page_text"]
+
+
+def test_a_failed_page_read_leaves_no_revision_to_compare():
+    controller, view = _queued_controller()
+    _open_verify(controller)
+    _resolve(controller.runtime.pending["summary"][0],
+        {"batch_id": "batch-a", "counts": {}, "read_revision": 7})
+    _resolve(controller.runtime.pending["pages"][0],
+        _read_page([_row(batch="batch-a")], batch="batch-a", revision=7))
+    for _ in range(2):
+        controller._poll()
+    controller.handle("verification_refresh", {})
+    controller.runtime.pending["pages"][-1].set_exception(
+        RuntimeError("page read failed"))
+    for _ in range(2):
+        controller._poll()
+    assert controller._verify_state == "error"
+    assert controller._verify_read_revision is None
+    # The summary of this generation is still a true fact; it must not be
+    # compared with a page revision that does not exist.
+    _resolve(controller.runtime.pending["summary"][-1],
+        {"batch_id": "batch-a", "counts": {}, "read_revision": 99})
+    for _ in range(2):
+        controller._poll()
+    assert "统计与列表不是同一次读取" not in view.named(
+        "set_verification_rows")[-1][2]["page_text"]
+
+
+def test_a_failed_summary_read_leaves_no_revision_to_compare():
+    controller, view = _queued_controller()
+    _open_verify(controller)
+    _resolve(controller.runtime.pending["pages"][0],
+        _read_page([_row(batch="batch-a")], batch="batch-a", revision=7))
+    for _ in range(2):
+        controller._poll()
+    controller.runtime.pending["summary"][0].set_exception(
+        RuntimeError("summary read failed"))
+    for _ in range(2):
+        controller._poll()
+    assert controller._verify_summary_revision is None
+    assert "统计与列表不是同一次读取" not in view.named(
+        "set_verification_rows")[-1][2]["page_text"]
