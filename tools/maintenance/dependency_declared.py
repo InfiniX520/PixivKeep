@@ -12,8 +12,15 @@ Public contract (frozen by docs/optimization/2026-11-14/U1B_FIVE_WAY.md):
         "dev":     [...],
         "build":   [...],
         "errors":  [{"file": str, "reason": str}],
+        "sources": [{"name", "specifier", "file", "line", "group"}],
         "generated_at": iso8601 str,
     }
+
+The "sources" key is additive: it records one entry per parsed declaration line,
+so a reader can tell which file and line a constraint came from.  The bucket
+rows stay exactly {name, specifier} - they carry the constraint, this carries
+where it was written.  A row without a source is still a row; pyproject entries
+carry a file and no line because TOML arrays have no per-item line here.
 
 Kinds are `runtime` (requirements.txt), `dev` (requirements-dev.txt),
 `build` (requirements-build.txt), `pyproject` (pyproject.toml) and
@@ -126,6 +133,7 @@ def _parse_requirements_file(
     buckets: dict[str, list[dict[str, str]]],
     seen: dict[str, set[tuple[str, str]]],
     errors: list[dict[str, str]],
+    sources: list[dict[str, object]],
     display: str,
 ) -> None:
     """Expand one requirements file into its bucket, in place."""
@@ -182,6 +190,7 @@ def _parse_requirements_file(
                 buckets=buckets,
                 seen=seen,
                 errors=errors,
+                sources=sources,
                 display=child_display,
             )
             continue
@@ -205,6 +214,18 @@ def _parse_requirements_file(
             )
             continue
         name, specifier = parsed
+        # Every occurrence is recorded with its source before the bucket dedupes
+        # it: two files may make the same statement, and the reader should still
+        # be able to see both.
+        sources.append(
+            {
+                "name": name,
+                "specifier": specifier,
+                "file": display,
+                "line": line_number,
+                "group": kind,
+            }
+        )
         key = (name.casefold(), specifier)
         if key in seen[kind]:
             continue
@@ -219,6 +240,7 @@ def _parse_pyproject(
     buckets: dict[str, list[dict[str, str]]],
     seen: dict[str, set[tuple[str, str]]],
     errors: list[dict[str, str]],
+    sources: list[dict[str, object]],
     display: str,
 ) -> None:
     """Read [project].dependencies and [build-system].requires from pyproject."""
@@ -246,6 +268,7 @@ def _parse_pyproject(
             buckets=buckets,
             seen=seen,
             errors=errors,
+            sources=sources,
             display=display,
             field="project.dependencies",
         )
@@ -257,6 +280,7 @@ def _parse_pyproject(
             buckets=buckets,
             seen=seen,
             errors=errors,
+            sources=sources,
             display=display,
             field="build-system.requires",
         )
@@ -269,6 +293,7 @@ def _add_pep508_list(
     buckets: dict[str, list[dict[str, str]]],
     seen: dict[str, set[tuple[str, str]]],
     errors: list[dict[str, str]],
+    sources: list[dict[str, object]],
     display: str,
     field: str,
 ) -> None:
@@ -295,6 +320,16 @@ def _add_pep508_list(
             )
             continue
         name, specifier = parsed
+        sources.append(
+            {
+                "name": name,
+                "specifier": specifier,
+                "file": display,
+                "line": None,
+                "group": kind,
+                "field": field,
+            }
+        )
         key = (name.casefold(), specifier)
         if key in seen[kind]:
             continue
@@ -325,6 +360,7 @@ def declared_requirements(root) -> dict[str, object]:
         "build": set(),
     }
     errors: list[dict[str, str]] = []
+    sources: list[dict[str, object]] = []
 
     for name, kind in TOP_LEVEL_FILES:
         path = base / name
@@ -338,6 +374,7 @@ def declared_requirements(root) -> dict[str, object]:
                 buckets=buckets,
                 seen=seen,
                 errors=errors,
+                sources=sources,
                 display=name,
             )
         else:
@@ -349,6 +386,7 @@ def declared_requirements(root) -> dict[str, object]:
                 buckets=buckets,
                 seen=seen,
                 errors=errors,
+                sources=sources,
                 display=name,
             )
 
@@ -358,6 +396,7 @@ def declared_requirements(root) -> dict[str, object]:
         "dev": buckets["dev"],
         "build": buckets["build"],
         "errors": errors,
+        "sources": sources,
         "generated_at": _now(),
     }
 
