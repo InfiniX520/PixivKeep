@@ -139,6 +139,18 @@ def test_a_stranger_inside_the_backup_directory_is_named_and_untouched(tmp_path)
     assert "unexpected_members" in report["warnings"]
 
 
+def test_a_verify_reports_the_claims_it_made(tmp_path):
+    root = _sealed(tmp_path)
+    report = m.verify_backup(root)
+    claims = report["evidence"]["claims"]
+    assert [item["name"] for item in claims] == ["library.sqlite3"]
+    claim = claims[0]
+    assert claim["purpose"] == "verify_copy"
+    assert claim["provable"] is True
+    assert len(claim["identity"]) == 2 and all(claim["identity"])
+    assert Path(claim["path"]).name == "library.sqlite3"
+
+
 def test_a_sidecar_identity_failure_is_reported_not_raised(tmp_path, monkeypatch):
     root = _sealed(tmp_path)
     real_lstat = os.lstat

@@ -545,17 +545,25 @@ def _copy_file(source: Path, destination: object) -> dict[str, object]:
     """
     digest = hashlib.sha256()
     total = 0
-    with source.open("rb") as reader, _owned_writer(destination) as writer:  # type: ignore[union-attr]
-        while True:
-            chunk = reader.read(_CHUNK_BYTES)
-            if not chunk:
-                break
-            digest.update(chunk)
-            writer.write(chunk)
-            total += len(chunk)
-        writer.flush()
-        os.fsync(writer.fileno())
-    return {"name": destination.name, "bytes": total, "sha256": digest.hexdigest()}
+    # The source is opened first: if it cannot be read, the destination has not
+    # been truncated yet and the caller's "this member vanished" path still
+    # holds a claimed member it can release.
+    with source.open("rb") as reader:
+        with _owned_writer(destination) as writer:  # type: ignore[union-attr]
+            while True:
+                chunk = reader.read(_CHUNK_BYTES)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                writer.write(chunk)
+                total += len(chunk)
+            writer.flush()
+            os.fsync(writer.fileno())
+    return {
+        "name": getattr(destination, "name", str(destination)),
+        "bytes": total,
+        "sha256": digest.hexdigest(),
+    }
 
 
 def _discard(workspace: TemporaryWorkspace) -> dict[str, object]:
@@ -2009,6 +2017,14 @@ def verify_backup(
             evidence["copy_bytes"] = timings["copy_bytes"]
             evidence["stability"] = stability
             evidence["scope"] = "isolated_copy"
+            # What this run claimed, and the identity it claimed it under: the
+            # record a reader needs to check that the cleanup judged the same
+            # objects the copy created.
+            evidence["claims"] = [
+                claim.as_dict()
+                for claim in (ws.claim_of(name) for name in copy_names)
+                if claim is not None
+            ]
             isolated = workspace / library_name
             if isolated.is_file():
                 read_started = time.perf_counter()
