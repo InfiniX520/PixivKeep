@@ -1,7 +1,7 @@
 {
   "project": "PixivKeep",
   "description": "Pixiv 原图收藏与整理工具；长期归档与恢复开发中",
-  "last_updated": "2026-11-14",
+  "last_updated": "2026-11-15",
   "sessions": [
     {
       "session_date": "2026-07-30",
@@ -2305,6 +2305,48 @@
           "p3_fixed": 4
         }
       }
+    },
+    {
+      "session_date": "2026-11-15",
+      "batch": "JPGPNG-U1U2-INDEPENDENT-AUDIT-20261115-01",
+      "summary": "Independent frozen-031627c audit: 1 P1 + 7 P2; current navigation repaired; product and business data unchanged.",
+      "report": "docs/audits/2026-11-15-u1u2-independent/README.md",
+      "guide": "docs/audits/2026-11-15-u1u2-independent/DEVELOPMENT_GUIDE.md",
+      "evidence": "docs/audits/2026-11-15-u1u2-independent/evidence/results.json",
+      "audited_commit": "031627c64eb2aac5605b05a21a47a7c0b3c5fef2",
+      "daily_commit": "4ba891e34c312f049ef933eeb517da1e928b7575",
+      "baseline_suite": {
+        "tests": 2994,
+        "passed": 2990,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 4
+      },
+      "new_probes": {
+        "tests": 17,
+        "failed": 15,
+        "passed": 2
+      },
+      "previous_probes_passed": 14,
+      "archive_tool_tests_passed": 23,
+      "worktrees": {
+        "active_worktrees": 43,
+        "archived_worktrees": 73,
+        "dirty_active": 5,
+        "previous_active_paths_missing": [],
+        "previous_heads_advanced": [
+          {
+            "path": ".runtime/jpgpng_post_tidy_reaudit_20261114_01/review",
+            "before": "9ee62068273324848a83061662d86ce9da46876c",
+            "now": "99494b15e171df3c7c32c68465b2147fb061d010"
+          }
+        ],
+        "daily_head": "4ba891e34c312f049ef933eeb517da1e928b7575",
+        "candidate_head": "031627c64eb2aac5605b05a21a47a7c0b3c5fef2"
+      },
+      "product_changed": false,
+      "business_data_changed": false,
+      "deployed": false
     }
   ]
 }
