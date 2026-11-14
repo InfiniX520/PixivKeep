@@ -112,3 +112,23 @@ AI 根据实际查看结果填写审阅 JSON。下面的 ID 和摘要只是字�
 导出不会覆盖已有文件。SQLite 记录属于你的账号资料，虽不保存认证凭据，也不要公开上传。错误输出只含经过限制的错误码；`status` / `show job` 记录预算和断点。硬关机可能让上个 job 仍显示 `running`，它不证明进程仍在运行，先核对进程与操作记录。
 
 浏览器请求数按本工具保守预留与可观察响应分别记录，浏览器超时后可能无法确定实际发送数；因此不能用缺少响应证明没有请求。网页自身加载资源不计入 CLI 预算。浏览器桥接每次有窗口定位和通信成本，本阶段以少量、串行、可核对的批次为目标；没有声称大批整理吞吐已通过验收。
+
+
+## 离线批次命令（不联网、不写文件）
+
+这三条命令只读本地 JSON、只把结果打到标准输出，**不打开任何连接、不写任何文件**，因此可以随时在断网环境下跑。它们与上面的账号命令是两套东西：`snapshot`/`sample`/`apply` 才联网。
+
+```powershell
+.organize.cmd batch-plan   --pool pool.json --max-artists 10 --max-requests 80 --max-bytes 33554432 --max-seconds 600
+.organize.cmd scope-plan   --snapshot snapshot.json --group landscape --group show:fav
+.organize.cmd batch-report --batch batch.json --decisions decisions.json --scope scope.json
+```
+
+- `pool.json`：画师 ID 的数组，例如 `["1001","1002"]`。
+- `snapshot.json`：关心快照对象，形状与 `organizer/snapshots.py` 落库的一致（`artists{id:{groups}}`、`memberships{show|hide:{tag:{ids}}}`、`memberships_complete`）。
+- `batch.json` / `scope.json`：引擎自己 `as_dict()` 的输出（`Batch.from_dict` / `GroupScope.from_dict` 能还原；指纹会重算，**文件里写的指纹不作依据**）。
+- `decisions.json`：`conflicts.decide()` 产出的列表。
+
+退出码：`0` 输入完整且结论成立；`3` 输入不可读、参数被拒、批次/范围被改过或组名有歧义；`5` 结论依赖的证据缺失（例如快照不完整、或有画师需要人工确认）。未知一律印「未知」，不印 0。
+
+这三条命令不产出任何写回动作：计划与报告只是给你看的证据，真正的分组写回仍由上面的 `apply --execute` 承担，且需要你在已登录的浏览器里操作。

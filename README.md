@@ -1,7 +1,7 @@
 # PixivKeep
 
 **当前状态（2026-11-15，U1/U2 审计修复）**：被审候选 `031627c` 的 **1 P1 + 7 P2 已全部修复**，审计的 17 项独立反例从 **15 红 / 2 绿** 变为 **17/17 全绿**；现有套件 **3,386 通过 / 4 跳过**（含 E1 整理离线引擎与覆盖摘要界面）（另有两个已登记的环境 flake：Tk 初始化、log-view 10 ms 刷盘竞态）。
-修复分支 `fix/a1-u1u2-audit-20261115`，日常仍为 `4ba891e`，**未部署**；E1-3/E1-4 与覆盖摘要/筛选解释的界面接线尚未开始。
+修复分支 `fix/a1-u1u2-audit-20261115`，日常仍为 `4ba891e`，**未部署**。覆盖摘要与筛选解释已有只读命令与只读界面；E1 的五个离线引擎（批次、规则、按组范围、冲突、报告）与三个离线命令已实现，**真实账号写回与小样仍需你本人参与**。
 先读[本轮审计](.runtime/jpgpng_u1u2_audit_20261115_01/review/docs/audits/2026-11-15-u1u2-independent/FINDINGS.md)、[开发指导](.runtime/jpgpng_u1u2_audit_20261115_01/review/docs/audits/2026-11-15-u1u2-independent/DEVELOPMENT_GUIDE.md)与[四个契约](docs/optimization/2026-11-15/FIX_CONTRACTS.md)。
 
 **把喜欢的 Pixiv 作品，按原图好好留下来。**
@@ -75,7 +75,7 @@ PixivKeep 是面向个人收藏的 Pixiv 原图下载与整理工具。以关注
 
 ## 维护
 
-源码在 `core/`、`gui/`、`utils/` 和 `organizer/`，测试在 `tests/`。下载器 P0—P8 和独立 CLI E1-2 已交付；画师分类小样 E1-3、分批整理 E1-4 待实施。最新阶段以 [重构进度](docs/refactor/REFACTOR_PROGRESS.md) 为准，`TASK_PLAN.json` 的七月阶段保留作历史。
+源码在 `core/`、`gui/`、`utils/` 和 `organizer/`，测试在 `tests/`。下载器 P0—P8 和独立 CLI E1-2 已交付；E1-3/E1-4 的离线部分（批次与断点、分类规则版本、按组范围、冲突与人工修改保留、批次报告、三个离线命令）已实现并离线验收，真实账号写回与小样批次需要你参与才能做。最新阶段以 [重构进度](docs/refactor/REFACTOR_PROGRESS.md) 为准，`TASK_PLAN.json` 的七月阶段保留作历史。
 
 当前测试、截图及回执放在工作区 `.runtime/`；历史 JpgPng 开发批次、最终候选、原始基线与验收报告按清单保留在[本机归档](../_archives/jpgpng_development_20261114/INDEX.md)，不随 Git 仓库分发。目录与恢复规则见[工作区导航](../docs/CURRENT_WORKSPACE.md)。已有未提交修改保留，不能用清理命令重置工作树或删除业务目录。
 

@@ -2310,7 +2310,7 @@
       "id": "JPGPNG-U1U2-AUDIT-FIX-20261115-01",
       "session_date": "2026-11-15",
       "status": "wiring_and_e1_offline_done_pending_user_audit",
-      "summary": "Fixed the 1 P1 + 7 P2 from the 031627c independent audit: ownership now spans create/write/SQLite/cleanup with claim identity checked before any write and sidecars retained when unprovable; the quality engine has one command-wide budget, a content version with path stability, four transport states and palette-bounds checking; coverage separates works from pages and only calls delivery complete when page evidence exists; the dependency report is schema 2 with input completeness in the exit code and every applicable constraint aggregated.",
+      "summary": "Fixed the 1 P1 + 7 P2 from the 031627c audit, then wired the engines into the product: ownership now spans create/write/SQLite/cleanup with claim identity proven at the write; the quality engine has one command budget, a content version with path stability, four transport states and palette bounds; coverage separates works from pages and only calls delivery complete with page evidence; the dependency report is schema 2 with input completeness in the exit code.  On top of that: read-only coverage and filter-explain commands over a mode=ro reader, a read-only coverage page and a why-not-downloaded line in the UI, and the five E1 offline engines (batches, rules, group scope, conflicts, report) with three offline commands and an end-to-end chain test.  Real account write-back, the downloader upload and a third-party decoder still need the user.",
       "audited_commit": "031627c64eb2aac5605b05a21a47a7c0b3c5fef2",
       "product_baseline": "4ba891e",
       "report": "docs/optimization/2026-11-15/FIX_CONTRACTS.md",

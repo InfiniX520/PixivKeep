@@ -402,3 +402,52 @@ def test_the_reader_answers_the_three_questions_it_promises(tmp_path):
     finally:
         reader.close()
 
+
+class _CompleteSummary:
+    """A stand-in for a summary the crawl store cannot produce yet."""
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def as_dict(self):
+        return dict(self._payload)
+
+
+def test_a_complete_summary_reaches_exit_zero_on_both_outputs(tmp_path, capsys, monkeypatch):
+    """The engine tops out at unknown from this source, so the 0 branch of the
+    command was never executed.  This pins the plumbing: given a complete
+    summary, both outputs say the conclusion holds and the code is 0.
+    """
+    import core.report_commands as module
+    from core.follow_coverage_counts import COUNT_KEYS
+
+    counts = {key: 0 for key in COUNT_KEYS}
+    counts["artists_checked"] = counts["artists_confirmed"] = 1
+    payload = {
+        "scope": {"kind": "follow_run"},
+        "overall": "complete",
+        "overall_reason": "",
+        "enumeration": {"state": "complete", "reason": ""},
+        "decision": {"state": "applied", "reason": ""},
+        "delivery": {"state": "complete", "reason": ""},
+        "page_end_evidence": {"state": "complete", "reason": ""},
+        "counts": counts,
+        "denominators": {"artists_total": 1, "artworks_total": None},
+        "consistent": True,
+        "reasons": [],
+        "inconsistent_reasons": [],
+        "stop_reason": "",
+        "notes": [],
+    }
+    monkeypatch.setattr(module, "build_coverage", lambda *a, **k: _CompleteSummary(payload))
+    database, run_id = _crawl_db(tmp_path)
+
+    code = main(["--json", "coverage", "--database", str(database), "--run", run_id])
+    body_json = json.loads(capsys.readouterr().out)
+    assert code == body_json["exit_code"] == 0
+    assert body_json["coverage"]["overall"] == "complete"
+
+    text_code = main(["coverage", "--database", str(database), "--run", run_id])
+    printed = capsys.readouterr().out
+    assert text_code == 0
+    assert "结论成立" in printed

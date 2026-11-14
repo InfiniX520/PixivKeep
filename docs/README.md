@@ -20,6 +20,11 @@
 
 ## 当前进度与计划
 
+- [U1/U2 审计修复的四个共同契约（2026-11-15）](optimization/2026-11-15/FIX_CONTRACTS.md)：所有权、质量观察、覆盖事实、依赖判断的字段与"未知怎么写"；本轮修复的判据。
+- [接线计划：先把引擎接成命令，再接进界面](optimization/2026-11-15/WIRING_PLAN.md)：`coverage` / `filter-explain` 两个只读命令的退出码，与界面挂点。
+- [E1 关注整理：离线五路与真实账号的边界](optimization/2026-11-15/E1_PLAN.md)：批次、规则、按组范围、冲突、报告的冻结契约与五路拆分。
+- [界面接线方案](optimization/2026-11-15/UI_PLAN.md)：覆盖摘要页面与"为什么没下载"的挂点、线程模型与测试策略。
+- [Tk 初始化间歇故障：实测与结论](optimization/2026-11-15/TK_STABILITY.md)：触发条件是 pytest 输出捕获 + Tcl 进程状态退化；`-s` 下 28 次 0 失败。
 - [优化、功能与归档联合实施：当前总入口](optimization/IMPLEMENTATION.md)：RFB-01..06（第 4K 节）、W5/W6 交付（第 4L 节）、W5/W6 证明修复（第 4M 节）、post-tidy 关闭（第 4N 节）与复审关闭（第 4O 节）按顺序读；第 4P 节是复审方的独立记录。旧编号不重复计算。
 - [W5/W6 审计与逐项发现](audits/2026-11-14-u1a-w5-w6/README.md)：1 P1 + 4 P2 + 1 P3，12 条独立反例（9 红 3 绿）与修复后的 12/12。
 - [W5/W6 证明与作用域契约 v5](optimization/2026-11-14/U1A_W5_W6_CONTRACT_V5.md)：五类备份事实、逻辑指纹算法、退出码、epoch 作用域与 A1..A8 修订。
