@@ -152,7 +152,7 @@ def test_a_full_walk_of_two_hundred_and_one_rows_visits_every_row_once(library):
     assert report["findings"] == []
     assert report["resume"] == {
         "state": "not_needed",
-        "complete_prefix": True,
+        "complete_prefix": False,
         "exit_code": 0,
     }
     assert len({row["artifact_id"] for row in report["rows"]}) == 201
@@ -663,3 +663,176 @@ def test_a_page_walk_is_one_page_and_never_claims_the_library(library):
     assert report["stats"]["examined"] == 200
     assert report["coverage"] == "partial"
     assert report["exit_code"] == 5
+
+
+# ---------------------------------------------------------------------------
+# Resume: a cursor says where to continue, never what has been proven
+# ---------------------------------------------------------------------------
+#
+# Amendment AMD2 section 4 freezes `complete_prefix` to False until a real
+# proof chain exists (ledger identity, schema version, filters and policy,
+# root mapping, a digest of the covered prefix, continuity across restarts).
+# None of that is implemented, so every case below pins False - including the
+# successful full walk, which certifies "this run reached the end" and
+# nothing about a run that has not happened yet.
+
+RESUME_STATES = {"not_needed", "at_cursor", "stopped", "blocked"}
+
+
+def assert_no_certificate(report):
+    """The resume block is shaped and honest; return it for the caller."""
+    resume = report["resume"]
+    assert set(resume) == {"state", "complete_prefix", "exit_code"}, resume
+    assert resume["complete_prefix"] is False, resume
+    assert resume["exit_code"] == report["exit_code"], resume
+    assert resume["state"] in RESUME_STATES, resume
+    return resume
+
+
+def test_a_finished_full_walk_reports_no_certificate(library):
+    repo, root = library
+    h.clone_artifacts(repo, root, 3)
+    report = walk(repo)
+    assert report["coverage"] == "complete"
+    assert report["exit_code"] == 0
+    resume = assert_no_certificate(report)
+    assert resume["state"] == "not_needed"
+
+
+def test_a_file_budget_stop_reports_no_certificate(library):
+    repo, root = library
+    h.clone_artifacts(repo, root, 200)
+    report = walk(repo, budget=ScanBudget(max_files=10))
+    assert report["coverage"] == "partial"
+    assert report["exit_code"] == 5
+    assert report["next_cursor"] is not None
+    resume = assert_no_certificate(report)
+    assert resume["state"] == "at_cursor"
+
+
+def test_a_byte_budget_stop_reports_no_certificate(library):
+    repo, root = library
+    h.clone_artifacts(repo, root, 200)
+    report = walk(repo, budget=ScanBudget(max_bytes=1000))
+    assert report["coverage"] == "partial"
+    assert report["stats"]["budget_exhausted_reason"] == "max_bytes"
+    assert report["exit_code"] == 5
+    resume = assert_no_certificate(report)
+    assert resume["state"] == "at_cursor"
+
+
+def test_a_row_over_the_byte_budget_ends_the_walk_without_a_certificate(library):
+    repo, root = library
+    h.clone_artifacts(repo, root, 3)
+    oversized = ordered(repo)[1]
+    h.sql(
+        repo,
+        "UPDATE artifacts SET size = ? WHERE artifact_id = ?",
+        (10 ** 6, oversized["artifact_id"]),
+    )
+    report = walk(repo, budget=ScanBudget(max_bytes=1000))
+    assert report["coverage"] == "complete"
+    assert report["unknown_reasons"] == {"file_exceeds_budget": 1}
+    assert report["exit_code"] == 5
+    assert_no_certificate(report)
+
+
+class _AlwaysCancelled:
+    def is_set(self):
+        return True
+
+
+class _CancelAfter:
+    def __init__(self, limit):
+        self.limit = limit
+        self.calls = 0
+
+    def is_set(self):
+        self.calls += 1
+        return self.calls > self.limit
+
+
+def test_a_cancellation_before_the_first_row_reports_no_certificate(library):
+    repo, root = library
+    h.clone_artifacts(repo, root, 5)
+    report = walk(repo, cancel=_AlwaysCancelled())
+    assert report["coverage"] == "cancelled"
+    assert report["stats"]["examined"] == 0
+    assert report["stats"]["stopped_at"] == "cancel"
+    assert report["exit_code"] == 5
+    resume = assert_no_certificate(report)
+    assert resume["state"] == "stopped"
+
+
+def test_a_cancellation_mid_walk_reports_no_certificate(library):
+    repo, root = library
+    h.clone_artifacts(repo, root, 300)
+    report = walk(repo, cancel=_CancelAfter(250))
+    assert report["coverage"] == "cancelled"
+    assert 0 < report["stats"]["examined"] < 301
+    assert report["exit_code"] == 5
+    assert_no_certificate(report)
+
+
+def test_a_ledger_error_blocks_the_certificate(library, monkeypatch):
+    repo, root = library
+    h.clone_artifacts(repo, root, 200)
+    original = audit.read_projection
+    calls = {"count": 0}
+
+    def flaky(connection):
+        calls["count"] += 1
+        if calls["count"] >= 2:
+            raise sqlite3.OperationalError("synthetic ledger failure")
+        return original(connection)
+
+    monkeypatch.setattr(audit, "read_projection", flaky)
+    report = walk(repo)
+    assert report["coverage"] == "error"
+    assert report["exit_code"] == 3
+    resume = assert_no_certificate(report)
+    assert resume["state"] == "blocked"
+
+
+def test_a_bare_continuation_at_the_end_reports_no_certificate(library):
+    repo, root = library
+    h.clone_artifacts(repo, root, 200)
+    last = ordered(repo)[-1]
+    cursor = (last["completed_at"], last["artifact_id"])
+    report = walk(repo, after=cursor, kind="continuation")
+    assert report["coverage"] == "empty"
+    assert report["exit_code"] == 5
+    assert_no_certificate(report)
+
+
+def test_an_explicit_page_reports_no_certificate(library):
+    repo, root = library
+    h.clone_artifacts(repo, root, 400)
+    report = walk(repo, kind="page")
+    assert report["coverage"] == "partial"
+    assert report["exit_code"] == 5
+    resume = assert_no_certificate(report)
+    assert resume["state"] == "at_cursor"
+
+
+def test_a_red_first_page_stays_red_without_a_certificate(library):
+    repo, root = library
+    h.clone_artifacts(repo, root, 400)
+    drop_file(root, ordered(repo)[250])
+    report = walk(repo)
+    assert report["pages_examined"] == 3
+    assert report["coverage"] == "complete"
+    assert report["exit_code"] == 2
+    assert [row["verdict"] for row in report["findings"]] == ["missing"]
+    assert_no_certificate(report)
+
+
+def test_the_certificate_is_not_derived_from_the_cursor_being_present(library):
+    """Two walks can both carry a cursor and still prove nothing."""
+    repo, root = library
+    h.clone_artifacts(repo, root, 300)
+    budgeted = walk(repo, budget=ScanBudget(max_files=10))
+    paged = walk(repo, kind="page", limit=10)
+    for report in (budgeted, paged):
+        assert report["next_cursor"] is not None
+        assert_no_certificate(report)

@@ -140,6 +140,11 @@ def scan_library_report(
     Returns a mapping with coverage, scope, pages_examined, library_rows,
     stats, findings, unknown_reasons, next_cursor, resume and exit_code
     (contract v6 section 3.2).
+
+    ``resume`` is ``{"state", "complete_prefix", "exit_code"}``.
+    ``complete_prefix`` is always False: this module has no proof chain, so a
+    cursor says where a later run *could* continue, never that everything
+    before it was covered by one consistent run (amendment AMD2 section 4).
     """
     walk = _kind(kind)
     page_limit = _limit(limit)
@@ -319,7 +324,7 @@ def scan_library_report(
         "rows_omitted": rows_omitted,
         "unknown_reasons": stats["unknown_reasons"],
         "next_cursor": list(next_cursor) if next_cursor is not None else None,
-        "resume": _resume(walk, coverage, exit_code, next_cursor),
+        "resume": _resume(coverage, exit_code, next_cursor),
         "exit_code": exit_code,
         "ledger": ledger,
         "mapping": mapping_state,
@@ -457,17 +462,33 @@ def _exit_code(walk, coverage, findings_count, unknown, unknown_reasons, allow_u
     return _EXIT_OK
 
 
-def _resume(walk, coverage, exit_code, next_cursor):
-    prefix = walk == "full_walk" and coverage != "error"
+def _resume(coverage, exit_code, next_cursor):
+    """How this walk ended, and what it is allowed to certify about itself.
+
+    ``complete_prefix`` is always False.  There is no proof chain: nothing
+    here records the ledger identity, the schema version, the filters or
+    policy, the root mapping, or a digest of the rows a run covered, so no
+    run can show that a later one starts from a prefix that one consistent
+    earlier run really visited.  A returned cursor is only the place where
+    continuing *could* make sense, and the flag stays False even for a
+    successful full walk: that walk says "this run reached the end", not
+    "the next run may trust what it did not do" (amendment AMD2 sec. 4).
+
+    ``state`` keeps the four outcomes the command line distinguishes:
+    not_needed (nothing more is required: the walk finished or the ledger
+    held nothing), at_cursor (a later run could continue at next_cursor),
+    stopped (it stopped with nowhere to continue) and blocked (the ledger
+    could not be read, so nothing can continue).
+    """
     if exit_code == _EXIT_OK:
         state = "not_needed"
     elif coverage == "error":
-        state, prefix = "blocked", False
+        state = "blocked"
     elif next_cursor is not None:
         state = "at_cursor"
     else:
-        state, prefix = "stopped", False
-    return {"state": state, "complete_prefix": prefix, "exit_code": exit_code}
+        state = "stopped"
+    return {"state": state, "complete_prefix": False, "exit_code": exit_code}
 
 
 # ---------------------------------------------------------------------------
