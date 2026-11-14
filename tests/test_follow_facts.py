@@ -81,6 +81,7 @@ def test_artists_are_sorted_by_id_and_keep_their_counters():
         "state": "done",
         "pages": 12,
         "newest_illust_id": "9",
+        "swept_at": "",
     }
 
 
@@ -199,3 +200,32 @@ def test_the_state_source_adapter_accepts_plain_values_too():
     assert facts["artists"] == []
     assert facts["incomplete"] == []
     assert facts["budget"] is None
+
+
+def test_an_artist_row_carries_its_swept_at_verbatim():
+    facts = gather_facts(
+        Source(
+            _run(),
+            artists=[
+                Row(
+                    artist_id="a1",
+                    state="done",
+                    works_seen=4,
+                    newest_illust_id="77",
+                    swept_at="2026-11-14T05:00:00+00:00",
+                )
+            ],
+        )
+    )
+    assert facts["artists"][0]["swept_at"] == "2026-11-14T05:00:00+00:00"
+
+
+def test_a_mapping_without_swept_at_yields_an_empty_string():
+    facts = gather_facts(Source(_run(), artists=[{"artist_id": "a1", "state": "done", "works_seen": 0}]))
+    assert facts["artists"][0]["swept_at"] == ""
+    assert "swept_at" in facts["artists"][0]
+
+
+def test_a_none_swept_at_is_an_empty_string_not_none():
+    facts = gather_facts(Source(_run(), artists=[Row(artist_id="a1", state="done", works_seen=0, swept_at=None)]))
+    assert facts["artists"][0]["swept_at"] == ""

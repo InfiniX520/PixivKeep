@@ -16,6 +16,11 @@ A source is anything with:
 
 Missing required pieces raise TypeError: a source that cannot answer is not
 the same thing as a run with no artists.
+
+Each artist row also carries ``swept_at``: the moment this run finished the
+incremental sweep for that artist, or the empty string when the run has no
+such evidence.  This module only passes the value through - it does not parse
+it, compare it, or decide whether a sweep "counts".
 """
 from __future__ import annotations
 
@@ -84,6 +89,9 @@ def _artist_facts(row: object) -> dict[str, Any]:
         "state": _text(_field(row, "state")),
         "pages": None if works is None else int(works),
         "newest_illust_id": _text(_field(row, "newest_illust_id")),
+        # Passed through verbatim: empty string means "no sweep evidence in
+        # this run", and interpreting that is the summariser's job, not ours.
+        "swept_at": _text(_field(row, "swept_at")),
     }
 
 
