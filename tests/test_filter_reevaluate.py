@@ -77,10 +77,12 @@ def test_a_candidate_excluded_on_both_sides_lands_in_still_excluded():
     assert result["still_excluded"] == ["a"]
 
 
-def test_unknown_on_the_old_side_is_uncovered_not_excluded():
+def test_an_old_unknown_that_matches_now_is_re_admitted():
+    """Widening exists to rescue exactly this candidate, not to park it."""
     result = run({"a": ("unknown", "match")}, ["a"])
-    assert result["uncovered"] == ["a"]
-    assert result["newly_included"] == []
+    assert result["newly_included"] == ["a"]
+    assert result["uncovered"] == []
+    assert result["uncovered_reasons"] == {}
 
 
 def test_unknown_on_the_new_side_is_uncovered_not_kept():
@@ -89,16 +91,49 @@ def test_unknown_on_the_new_side_is_uncovered_not_kept():
     assert result["kept"] == []
 
 
-def test_unknown_outranks_exclude_on_the_other_side():
+def test_a_new_unknown_outranks_the_old_exclusion():
     result = run({"a": ("exclude", "unknown")}, ["a"])
     assert result["uncovered"] == ["a"]
     assert result["still_excluded"] == []
 
 
-def test_unknown_outranks_match_on_the_other_side():
+def test_an_old_unknown_that_is_excluded_now_stays_excluded():
     result = run({"a": ("unknown", "exclude")}, ["a"])
-    assert result["uncovered"] == ["a"]
+    assert result["still_excluded"] == ["a"]
+    assert result["uncovered"] == []
+
+
+def test_widening_re_admits_every_candidate_the_tight_filter_had_hidden():
+    """The nine-fixture shape: tight (min_bookmarks+exclude_ai) -> no filter.
+
+    1001 bookmarks below, 1002 ai excluded, 1005 ai flag missing, 1006 bookmarks
+    missing, 1009 merely below the tight threshold: all five are admitted now.
+    """
+    table = {
+        "1001": ("exclude", "match"),
+        "1002": ("exclude", "match"),
+        "1003": ("exclude", "exclude"),
+        "1004": ("unknown", "unknown"),
+        "1005": ("unknown", "match"),
+        "1006": ("unknown", "match"),
+        "1007": ("exclude", "exclude"),
+        "1008": ("match", "match"),
+        "1009": ("exclude", "match"),
+    }
+    result = run(table, list(table))
+    assert result["newly_included"] == ["1001", "1002", "1005", "1006", "1009"]
+    assert result["kept"] == ["1008"]
+    assert result["still_excluded"] == ["1003", "1007"]
+    assert result["uncovered"] == ["1004"]
     assert result["newly_excluded"] == []
+    assert list(result["uncovered_reasons"]) == ["1004"]
+
+
+def test_a_candidate_still_unknown_under_the_new_conditions_stays_uncovered():
+    """kind_unknown stays unanswerable; widening must not invent an answer."""
+    result = run({"a": ("unknown", "unknown")}, ["a"])
+    assert result["uncovered"] == ["a"]
+    assert result["newly_included"] == []
 
 
 # --- exhaustiveness -------------------------------------------------------
@@ -225,9 +260,9 @@ def test_uncovered_reasons_merge_both_sides_and_drop_exact_duplicates():
     assert result["uncovered_reasons"]["a"] == [shared, other]
 
 
-def test_uncovered_reasons_only_names_uncovered_candidates():
-    reasons = {("a", "old"): [{"code": "field_unknown"}], ("b", "old"): [{"code": "field_unknown"}]}
-    result = run({"a": ("unknown", "match"), "b": ("match", "match")}, ["a", "b"], reasons=reasons)
+def test_uncovered_reasons_only_names_candidates_the_new_run_could_not_judge():
+    reasons = {("a", "new"): [{"code": "field_unknown"}], ("b", "old"): [{"code": "field_unknown"}]}
+    result = run({"a": ("match", "unknown"), "b": ("match", "match")}, ["a", "b"], reasons=reasons)
     assert list(result["uncovered_reasons"]) == ["a"]
 
 
