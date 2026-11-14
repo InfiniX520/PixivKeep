@@ -249,6 +249,13 @@ class GroupScope:
         claimed = value.get("fingerprint")
         if claimed is not None and claimed != scope.fingerprint:
             raise OrganizerError("scope_fingerprint_mismatch")
+        # The fingerprint covers the sides and the member blocks, not the flat
+        # artist list, so the two have to agree with each other as well: a dump
+        # whose artist_ids were edited would otherwise pass on a valid
+        # fingerprint while describing a different member set.
+        from_blocks = tuple(sorted({artist for _, ids in scope.blocks for artist in ids}))
+        if tuple(sorted(scope.artist_ids)) != from_blocks:
+            raise OrganizerError("scope_members_inconsistent")
         return scope
 
     def __eq__(self, other):

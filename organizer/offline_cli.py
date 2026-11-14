@@ -179,8 +179,11 @@ def _report_engine():
     try:
         module = importlib.import_module("organizer.report")
     except ImportError:
-        return None
-    return getattr(module, "build_report", None)
+        return None, None
+    # The report engine has its own error type and it is not an OrganizerError,
+    # so the caller needs it by name to turn a refusal into exit 3 instead of a
+    # traceback.
+    return getattr(module, "build_report", None), getattr(module, "ReportError", None)
 
 
 def _rehydrate_batch(payload):
@@ -196,7 +199,9 @@ def _rehydrate_scope(payload):
     try:
         return GroupScope.from_dict(payload)
     except OrganizerError as error:
-        raise OfflineRefusal(getattr(error, "code", "scope_invalid"), "") from None
+        raise OfflineRefusal(
+            "scope_invalid:" + str(getattr(error, "code", "scope_error")), ""
+        ) from None
 
 
 def cmd_batch_report(args):
@@ -205,7 +210,7 @@ def cmd_batch_report(args):
     decisions = _load(args.decisions, "decisions")
     if not isinstance(decisions, list):
         raise OfflineRefusal("report_input_shape_invalid", "decisions must be a list")
-    builder = _report_engine()
+    builder, report_error = _report_engine()
     if builder is None:
         # The report engine is a separate work package.  Refusing beats printing a
         # summary assembled here: two implementations would drift apart.
@@ -219,6 +224,12 @@ def cmd_batch_report(args):
         raise OfflineRefusal("report_engine_contract", error) from None
     except OrganizerError as error:
         raise OfflineRefusal(getattr(error, "code", "report_refused"), error) from None
+    except Exception as error:
+        if isinstance(report_error, type) and isinstance(error, report_error):
+            raise OfflineRefusal(
+                "report_refused:" + str(getattr(error, "code", "report_error")), error
+            ) from None
+        raise
     data = _json_safe(report)
     lines = _report_lines(data)
     unproven = scope.completeness != "complete" or bool(data.get("unknowns"))
@@ -231,11 +242,25 @@ def cmd_batch_report(args):
     return payload, lines, (EXIT_UNPROVEN if unproven else EXIT_OK)
 
 
+def _flatten_counts(counts):
+    """One level of nesting becomes dotted keys, so the line stays readable."""
+    flat = {}
+    for key in sorted(counts):
+        value = counts[key]
+        if isinstance(value, dict):
+            for sub in sorted(value):
+                flat["%s.%s" % (key, sub)] = value[sub]
+        else:
+            flat[key] = value
+    return flat
+
+
 def _report_lines(data):
     lines = []
     counts = data.get("counts")
     if isinstance(counts, dict) and counts:
-        parts = ["%s=%s" % (key, counts[key]) for key in sorted(counts)]
+        flat = _flatten_counts(counts)
+        parts = ["%s=%s" % (key, flat[key]) for key in sorted(flat)]
         lines.append("状态计数: %s" % (" ".join(parts),))
     else:
         lines.append("状态计数: 未知（报告未提供）")

@@ -3,14 +3,16 @@ from __future__ import annotations
 
 import ast
 import json
-import types
+import sys
 from pathlib import Path
 
 import pytest
 
-import organizer
 from organizer import offline_cli
+from organizer.batches import Batch, plan_batch
 from organizer.cli import main
+from organizer.conflicts import decide
+from organizer.group_scope import GroupScope, build_scope
 
 
 def write(tmp_path, name, payload):
@@ -59,24 +61,38 @@ def batch_args(tmp_path, **overrides):
     return argv
 
 
-def fake_report_module(monkeypatch, *, unknowns=()):
-    module = types.ModuleType("organizer.report")
+PLAN_ROW = {"artist_id": "1001", "groups": ["landscape"], "target": "landscape"}
 
-    def build_report(batch, decisions, scope, *, measured=None, generated_at=""):
-        return {
-            "counts": {"applied": 1, "pending": 1},
-            "unknowns": list(unknowns),
-            "planned_vs_measured": {"state": "unknown", "reason": "no_measurement"},
-            "provenance": {
-                "batch_fingerprint": (batch or {}).get("fingerprint", ""),
-                "scope_completeness": (scope or {}).get("completeness", ""),
-            },
-        }
 
-    module.build_report = build_report
-    monkeypatch.setitem(__import__("sys").modules, "organizer.report", module)
-    monkeypatch.delattr(organizer, "report", raising=False)
-    return module
+def build_inputs(tmp_path, *, complete=True, moved=False):
+    """Build the three JSON files with the engines themselves, not by hand."""
+    before = snapshot_payload(complete=complete)
+    after = snapshot_payload(complete=complete)
+    if moved:
+        after["artists"]["1002"]["groups"] = ["portrait"]
+    batch = plan_batch(["1001", "1002"], account_id="a1", artists=2, requests=10)
+    scope = build_scope(before, groups=["landscape"])
+    plan = {
+        "artists": [
+            dict(PLAN_ROW),
+            {"artist_id": "1002", "groups": ["portrait", "landscape"], "target": "landscape"},
+        ]
+    }
+    decisions = decide(before, after, plan)
+    return (
+        write(tmp_path, "batch.json", batch.as_dict()),
+        write(tmp_path, "decisions.json", decisions),
+        write(tmp_path, "scope.json", scope.as_dict()),
+    )
+
+
+def report_args(batch, decisions, scope):
+    return [
+        "batch-report",
+        "--batch", str(batch),
+        "--decisions", str(decisions),
+        "--scope", str(scope),
+    ]
 
 
 def test_batch_plan_prints_counts_status_and_fingerprint(tmp_path, capsys):
@@ -189,64 +205,109 @@ def test_scope_plan_without_a_group_is_refused(tmp_path, capsys):
     assert "group_argument_empty" in capsys.readouterr().err
 
 
-def test_batch_report_uses_the_engine_and_never_writes_zero_for_unknown(
-    tmp_path, capsys, monkeypatch
-):
-    fake_report_module(monkeypatch)
-    batch = write(tmp_path, "batch.json", {"fingerprint": "abc", "steps": {"1001": "applied"}})
-    decisions = write(tmp_path, "decisions.json", [])
-    scope = write(tmp_path, "scope.json", {"completeness": "complete", "fingerprint": "def"})
-    code = main([
-        "batch-report", "--batch", str(batch), "--decisions", str(decisions),
-        "--scope", str(scope),
-    ])
-    out = capsys.readouterr().out
+def test_batch_report_end_to_end_over_the_real_engines(tmp_path, capsys):
+    batch, decisions, scope = build_inputs(tmp_path)
+    code = main(report_args(batch, decisions, scope) + ["--json"])
+    payload = json.loads(capsys.readouterr().out)
     assert code == 0
+    counts = payload["report"]["counts"]
+    assert counts["total"] == 2
+    assert sum(counts["states"].values()) == 2
+    assert payload["report"]["planned_vs_measured"]["state"] == "unknown"
+
+    text_code = main(report_args(batch, decisions, scope))
+    out = capsys.readouterr().out
+    assert text_code == 0
     assert "状态计数: " in out
+    assert "states.pending=2" in out
     measured = [line for line in out.splitlines() if line.startswith("计划对实测")][0]
     assert "未知" in measured
     assert "0" not in measured
 
 
-def test_batch_report_with_unknowns_cannot_exit_zero(tmp_path, capsys, monkeypatch):
-    fake_report_module(monkeypatch, unknowns=[{"artist_id": "1002", "reason": "group_ambiguous"}])
-    batch = write(tmp_path, "batch.json", {"fingerprint": "abc", "steps": {}})
-    decisions = write(tmp_path, "decisions.json", [])
-    scope = write(tmp_path, "scope.json", {"completeness": "complete"})
-    code = main([
-        "batch-report", "--batch", str(batch), "--decisions", str(decisions),
-        "--scope", str(scope),
-    ])
+def test_a_moved_artist_makes_the_report_unproven(tmp_path, capsys):
+    batch, decisions, scope = build_inputs(tmp_path, moved=True)
+    code = main(report_args(batch, decisions, scope))
     out = capsys.readouterr().out
     assert code == 5
     assert "待人工确认: 1 项" in out
+    assert "1002" in out
+
+
+def test_a_tampered_batch_is_refused_by_its_fingerprint(tmp_path, capsys):
+    batch, decisions, scope = build_inputs(tmp_path)
+    payload = json.loads(Path(batch).read_text(encoding="utf-8"))
+    payload["policy"]["budget"]["requests"] = 99
+    write(tmp_path, "batch.json", payload)
+    code = main(report_args(batch, decisions, scope))
+    captured = capsys.readouterr()
+    assert code == 3
+    assert "batch_invalid:batch_fingerprint_mismatch" in captured.err
+
+
+def test_a_batch_missing_a_field_names_the_field(tmp_path, capsys):
+    batch, decisions, scope = build_inputs(tmp_path)
+    payload = json.loads(Path(batch).read_text(encoding="utf-8"))
+    payload.pop("steps")
+    write(tmp_path, "batch.json", payload)
+    code = main(report_args(batch, decisions, scope))
+    assert code == 3
+    refused = capsys.readouterr().err
+    assert "batch_field_missing" in refused
+    assert "steps" in refused
+
+
+def test_a_tampered_scope_is_refused_by_its_fingerprint(tmp_path, capsys):
+    batch, decisions, scope = build_inputs(tmp_path)
+    payload = json.loads(Path(scope).read_text(encoding="utf-8"))
+    payload["artist_ids"] = payload["artist_ids"] + ["9999"]
+    write(tmp_path, "scope.json", payload)
+    code = main(report_args(batch, decisions, scope))
+    captured = capsys.readouterr()
+    assert code == 3
+    assert "scope_invalid" in captured.err
+    assert "scope_members_inconsistent" in captured.err
+
+
+def test_a_decision_outside_the_batch_is_refused_not_summed(tmp_path, capsys):
+    batch, decisions, scope = build_inputs(tmp_path)
+    payload = json.loads(Path(decisions).read_text(encoding="utf-8"))
+    payload.append(
+        {"artist_id": "9999", "kind": "new_member", "action": "replan",
+         "reason": "membership_missing", "needs_human": False, "evidence": {}}
+    )
+    write(tmp_path, "decisions.json", payload)
+    code = main(report_args(batch, decisions, scope))
+    captured = capsys.readouterr()
+    assert code == 3
+    assert "report_refused" in captured.err
+    assert "Traceback" not in captured.err
 
 
 def test_batch_report_refuses_when_the_engine_is_absent(tmp_path, capsys, monkeypatch):
-    import sys
-
     monkeypatch.setitem(sys.modules, "organizer.report", None)
-    batch = write(tmp_path, "batch.json", {"fingerprint": "abc", "steps": {}})
-    decisions = write(tmp_path, "decisions.json", [])
-    scope = write(tmp_path, "scope.json", {"completeness": "complete"})
-    code = main([
-        "batch-report", "--batch", str(batch), "--decisions", str(decisions),
-        "--scope", str(scope),
-    ])
+    batch, decisions, scope = build_inputs(tmp_path)
+    code = main(report_args(batch, decisions, scope))
     captured = capsys.readouterr()
     assert code == 3
     assert "report_engine_missing" in captured.err
 
 
-def test_a_partial_scope_cannot_make_the_report_say_zero(tmp_path, capsys, monkeypatch):
-    fake_report_module(monkeypatch)
-    batch = write(tmp_path, "batch.json", {"fingerprint": "abc", "steps": {}})
-    decisions = write(tmp_path, "decisions.json", [])
-    scope = write(tmp_path, "scope.json", {"completeness": "partial"})
-    code = main([
-        "batch-report", "--batch", str(batch), "--decisions", str(decisions),
-        "--scope", str(scope),
-    ])
+def test_the_round_trip_keeps_both_fingerprints():
+    batch = plan_batch(["1001", "1002"], account_id="a1", artists=2, requests=10)
+    dumped = batch.as_dict()
+    assert Batch.from_dict(dumped).as_dict() == dumped
+    assert Batch.from_dict(dumped).fingerprint() == batch.fingerprint()
+
+    scope = build_scope(snapshot_payload(), groups=["landscape"])
+    dumped_scope = scope.as_dict()
+    assert GroupScope.from_dict(dumped_scope).as_dict() == dumped_scope
+    assert GroupScope.from_dict(dumped_scope).fingerprint == scope.fingerprint
+
+
+def test_a_partial_scope_keeps_the_report_from_claiming_success(tmp_path, capsys):
+    batch, decisions, scope = build_inputs(tmp_path, complete=False)
+    code = main(report_args(batch, decisions, scope))
     assert code == 5
 
 
