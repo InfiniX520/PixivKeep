@@ -91,3 +91,30 @@ QualityEvidence:
 4. 只读复审（增量）无 P1/P2。
 
 不在本批次：安装任何组件、真实图库解码、GUI 新增页面、schema 变更。
+
+## 5. 小节点拆分（一个节点做完并验收，再进下一个）
+
+大节点不一次交付。每个小节点必须自带完成定义与证据，验收通过才进下一个；任何一步失败就停在那一步，不往下堆。
+
+### U1-B（4 个小节点）
+
+| 步 | 交付 | 完成定义 / 证据 |
+| --- | --- | --- |
+| B1 事实清点 | 解释器、环境路径、项目声明文件清单、已安装包清单（名称+版本） | 一份原始快照 JSON；不含任何改写、不做判断 |
+| B2 差异与风险 | missing / unexpected / import 解析路径 / `pip check` 结果 | 报告器可跑；单测覆盖「声明了但没装」「装了但没声明」「`pip check` 非零」 |
+| B3 三态与回退材料 | 文档：advisory_matched / upgrade_done / compat_checked 三列 + 回退清单与窗口条件 | 三态字段有测试；文档明确本轮 `upgrade_done=false` 及原因 |
+| B4 真实只读跑一次 | 把 B1–B3 在真实环境跑一遍（只读） | 结果写进文档；AST 断言代码里没有 install/uninstall/upgrade |
+
+### U1-C（4 个小节点）
+
+| 步 | 交付 | 完成定义 / 证据 |
+| --- | --- | --- |
+| C1 证据模型 | `QualityEvidence`（source/transport/structure/decode/pages）+ `DecodeReceipt` | 纯数据 + 单测；**不改** `inspect_image` 现有行为 |
+| C2 PNG 解码器 | zlib 解 IDAT → 逐行反滤波（None/Sub/Up/Average/Paeth）→ 每行 filter 与总长校验 | 合法/截断/非法 filter/隔行 四类用例；输出 ok/failed(reason) |
+| C3 资源上限与取消 | max_bytes/max_pixels/max_frames/max_seconds + stop | 超限/取消 → `undecided`（带 reason），不是 `failed`；逐项用例 |
+| C4 集成与只读证明 | `inspect_image(..., decode_policy=)`，默认 structure；其它格式 `capability_unavailable` | 矩阵全过；解码前后 `sha256` 一致；历史行 `verification` 不被改写 |
+
+### 顺序与并行
+
+- U1-B 与 U1-C 两条 lane 可并行（文件不重叠），但**各自内部按 B1→B4、C1→C4 串行**，每步单独提交、单独验收。
+- U2-A / U2-B 不在本批次开工；等 U1 组验收后再拆它们的小节点。
