@@ -2009,6 +2009,14 @@ def verify_backup(
             evidence["copy_bytes"] = timings["copy_bytes"]
             evidence["stability"] = stability
             evidence["scope"] = "isolated_copy"
+            # What this run claimed, and the identity it claimed it under: the
+            # record a reader needs to check that the cleanup judged the same
+            # objects the copy created.
+            evidence["claims"] = [
+                claim.as_dict()
+                for claim in (ws.claim_of(name) for name in copy_names)
+                if claim is not None
+            ]
             isolated = workspace / library_name
             if isolated.is_file():
                 read_started = time.perf_counter()
