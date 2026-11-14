@@ -234,3 +234,102 @@ def build_webp_header() -> bytes:
     chunk_bytes = b"VP8 " + struct.pack("<I", len(payload)) + payload
     riff_size = 4 + len(chunk_bytes)
     return b"RIFF" + struct.pack("<I", riff_size) + b"WEBP" + chunk_bytes
+
+
+# -- per-pass filter control (P1 regression support) ---------------------
+
+
+def _paeth(left: int, up: int, upper_left: int) -> int:
+    """The PNG Paeth predictor, written independently of the decoder."""
+    estimate = left + up - upper_left
+    to_left = abs(estimate - left)
+    to_up = abs(estimate - up)
+    to_upper_left = abs(estimate - upper_left)
+    if to_left <= to_up and to_left <= to_upper_left:
+        return left
+    if to_up <= to_upper_left:
+        return up
+    return upper_left
+
+
+def forward_filter(filter_type: int, raw: bytes, previous: bytes, bpp: int) -> bytes:
+    """Encode one row the way a PNG writer would, so a decoder must reverse it."""
+    if filter_type not in (0, 1, 2, 3, 4):
+        raise ValueError("filter type must be 0..4")
+    out = bytearray()
+    for index, value in enumerate(raw):
+        left = raw[index - bpp] if index >= bpp else 0
+        up = previous[index] if previous else 0
+        upper_left = previous[index - bpp] if previous and index >= bpp else 0
+        if filter_type == 0:
+            out.append(value)
+        elif filter_type == 1:
+            out.append((value - left) & 0xFF)
+        elif filter_type == 2:
+            out.append((value - up) & 0xFF)
+        elif filter_type == 3:
+            out.append((value - ((left + up) >> 1)) & 0xFF)
+        else:
+            out.append((value - _paeth(left, up, upper_left)) & 0xFF)
+    return bytes(out)
+
+
+def raw_scanlines_with_pass_filters(
+    width: int,
+    height: int,
+    *,
+    interlaced: bool,
+    first_row_filters: dict,
+) -> tuple[bytes, bytes]:
+    """(filtered scanline stream, raw pixel stream) for chosen first-row filters.
+
+    first_row_filters maps the index of a *non-empty* pass (0-based, in Adam7
+    order) to the filter type of that pass's first row; every other row uses
+    filter 0.  Each pass starts with no previous row, exactly as PNG requires:
+    the encoder here resets its own previous row at every pass boundary too.
+
+    The returned raw stream is what the decoder's pixels_sha256 must equal, so a
+    test never has to ask the decoder what the answer is.
+    """
+    passes: list[tuple[list[int], list[int]]] = []
+    if not interlaced:
+        passes.append((list(range(width)), list(range(height))))
+    else:
+        for x_start, y_start, x_step, y_step in ADAM7:
+            columns = columns_of(width, x_start, x_step)
+            rows = rows_of(height, y_start, y_step)
+            if columns and rows:
+                passes.append((columns, rows))
+    stream = bytearray()
+    expected = bytearray()
+    for pass_index, (columns, rows) in enumerate(passes):
+        previous = b""
+        for row_index, y in enumerate(rows):
+            raw = b"".join(pixel(x, y) for x in columns)
+            filter_type = first_row_filters.get(pass_index, 0) if row_index == 0 else 0
+            stream.append(filter_type)
+            stream += forward_filter(filter_type, raw, previous, BYTES_PER_PIXEL)
+            expected += raw
+            previous = raw
+    return bytes(stream), bytes(expected)
+
+
+def build_interlaced_with_pass_filters(
+    width: int = 8,
+    height: int = 8,
+    *,
+    first_row_filters: dict | None = None,
+) -> tuple[bytes, bytes]:
+    """(PNG bytes, raw pixel stream) with per-pass first-row filters.
+
+    The regression this exists for: a decoder that keeps the previous pass's
+    last row as "previous" decodes these rows against the wrong neighbour.  With
+    filter type 2 (Up) on a pass's first row the damage is silent (the pixels
+    come out wrong) or fatal (IndexError when the passes differ in width).
+    """
+    filters = dict(first_row_filters or {})
+    stream, expected = raw_scanlines_with_pass_filters(
+        width, height, interlaced=True, first_row_filters=filters
+    )
+    image = build_png(width, height, interlaced=True, idat_payload=zlib.compress(stream, 9))
+    return image, expected

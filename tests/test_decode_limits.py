@@ -1,4 +1,5 @@
 """Budget behaviour: boundaries, accumulation, cancel, and no exceptions."""
+import dataclasses
 import math
 
 import pytest
@@ -58,7 +59,7 @@ def test_defaults_are_positive_and_exported():
 
 def test_limits_are_immutable():
     limits = DecodeLimits(max_bytes=10)
-    with pytest.raises(Exception):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         limits.max_bytes = 20
 
 
@@ -301,3 +302,38 @@ def test_the_default_clock_resolves_a_fractional_limit():
     time.sleep(0.05)
     assert budget_.check_time() == "time_limit"
     assert budget_.snapshot()["elapsed_seconds"] >= 0.01
+
+
+# -- the decoder delegates to this budget (P2-1 convergence) -------------
+
+
+def test_the_decoder_owns_no_limits_of_its_own():
+    """One definition of the defaults: this module. Anything else is a fork."""
+    import inspect
+
+    from core import png_decode
+
+    for name in (
+        "DEFAULT_MAX_BYTES",
+        "DEFAULT_MAX_PIXELS",
+        "_DEFAULT_MAX_BYTES",
+        "_DEFAULT_MAX_PIXELS",
+        "_Budget",
+    ):
+        assert not hasattr(png_decode, name), name
+
+    default = inspect.signature(png_decode.decode_png).parameters["limits"].default
+    assert default is None  # "no argument" means DecodeLimits(), not a hidden copy
+
+
+def test_the_maintenance_limits_are_an_explicit_named_object():
+    """quality_check uses its own larger limits; both are named, neither is hidden."""
+    from core import quality_check
+
+    maintenance = quality_check.DEFAULT_LIMITS
+    assert isinstance(maintenance, DecodeLimits)
+    library = DecodeLimits()
+    assert maintenance.as_dict() != library.as_dict()
+    assert maintenance.max_bytes > library.max_bytes
+    # The difference is deliberate: full-size pages versus a library default.
+    assert maintenance.max_bytes == 256 * 1024 * 1024

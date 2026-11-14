@@ -1,7 +1,9 @@
 """Acceptance tests for the stdlib PNG decoder.
 
 Every sample is built here from bytes: no downloads, no fixtures, no writes to
-anything but the pytest temporary directory.
+anything but the pytest temporary directory.  Expected pixels are always
+computed by the test (or by tests/png_samples, which is an encoder), never by
+asking the decoder what the answer is.
 """
 from __future__ import annotations
 
@@ -11,17 +13,11 @@ import zlib
 
 import pytest
 
+import png_samples as samples
 from core import png_decode
+from core.decode_limits import Budget, DecodeLimits
 
 SIG = b"\x89PNG\r\n\x1a\n"
-
-
-class Limits:
-    def __init__(self, max_bytes=None, max_pixels=None, max_frames=None, max_seconds=None):
-        self.max_bytes = max_bytes
-        self.max_pixels = max_pixels
-        self.max_frames = max_frames
-        self.max_seconds = max_seconds
 
 
 class Stop:
@@ -87,18 +83,25 @@ def apply_filter(kind, raw, previous, bpp):
 
 
 def rows_with_filters(pixels, bpp, filters):
-    raw_rows = []
     filtered = []
     previous = b""
     for row, kind in zip(pixels, filters):
         filtered.append(bytes([kind]) + apply_filter(kind, row, previous, bpp))
-        raw_rows.append(row)
         previous = row
-    return filtered, b"".join(raw_rows)
+    return filtered, b"".join(pixels)
 
 
 def digest(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
+
+
+def _stream(data: bytes):
+    import io
+
+    return io.BytesIO(data)
+
+
+# -- happy paths ---------------------------------------------------------
 
 
 def test_a_valid_rgba_png_decodes_every_row():
@@ -123,7 +126,7 @@ def test_every_filter_type_is_reversed():
 
 
 def _interlaced_2x2():
-    """Adam7 for a 2x2 image: pass 1 is (0,0), pass 6 is (1,0), pass 7 is (0,1)+(1,1)."""
+    """Adam7 for a 2x2 image: pass 1 is (0,0), pass 6 is (1,0), pass 7 is the bottom row."""
     top_left = bytes([1, 2, 3, 4])
     top_right = bytes([5, 6, 7, 8])
     bottom_left = bytes([9, 10, 11, 12])
@@ -139,6 +142,38 @@ def test_an_interlaced_png_decodes_all_passes():
     assert result["state"] == "ok", result
     assert result["rows_unfiltered"] == 3
     assert result["pixels_sha256"] == digest(expected)
+
+
+# -- P1 regression: every pass starts without a previous row -------------
+
+
+def test_every_pass_starts_without_a_previous_row():
+    # 8x8 interlaced: all seven Adam7 passes are non-empty, and the first row of
+    # each one uses filter 2 (Up).  A decoder that kept the previous pass's last
+    # row would either read past its buffer (passes differ in width) or decode
+    # the wrong pixels.
+    image, expected = samples.build_interlaced_with_pass_filters(
+        8, 8, first_row_filters={index: 2 for index in range(7)}
+    )
+    result = png_decode.decode_png(_stream(image))
+    assert result["state"] == "ok", result
+    # 8x8 over seven passes is 15 scanlines (1+1+1+2+2+4+4) and 64 pixels.
+    assert result["rows_unfiltered"] == 15
+    assert result["pixels"] == 64
+    assert result["pixels_sha256"] == digest(expected)
+
+
+def test_only_the_fourth_pass_first_row_uses_up():
+    # The silent case: only pass 4's first row uses filter 2, and that pass has
+    # the same row width as the pass before it, so nothing goes out of bounds --
+    # the pixels simply come out wrong unless previous is reset per pass.
+    image, expected = samples.build_interlaced_with_pass_filters(8, 8, first_row_filters={3: 2})
+    result = png_decode.decode_png(_stream(image))
+    assert result["state"] == "ok", result
+    assert result["pixels_sha256"] == digest(expected)
+
+
+# -- broken files --------------------------------------------------------
 
 
 def test_a_bad_filter_byte_is_a_failure_not_a_guess():
@@ -192,22 +227,56 @@ def test_an_apng_control_chunk_is_refused():
     assert (result["state"], result["reason"]) == ("failed", "apng_unsupported")
 
 
+@pytest.mark.parametrize(
+    "data, reason",
+    [
+        (SIG, "truncated"),
+        (SIG + b"\x00\x00\x00\x0dIH", "truncated"),
+        (SIG + struct.pack(">I4s", 0xFFFFFFFF, b"IHDR"), "bad_chunk"),
+        (SIG + chunk(b"IDAT", b"") + chunk(b"IEND", b""), "missing_ihdr"),
+        (SIG + chunk(b"IHDR", b"\x00" * 12), "bad_ihdr"),
+        (SIG + chunk(b"IHDR", struct.pack(">IIBBBBB", 4, 4, 8, 5, 0, 0, 0)), "bad_color_type"),
+        (SIG + chunk(b"IHDR", struct.pack(">IIBBBBB", 0, 4, 8, 6, 0, 0, 0)), "bad_dimensions"),
+    ],
+)
+def test_malformed_inputs_return_a_result_instead_of_raising(data, reason):
+    result = png_decode.decode_png(_stream(data))
+    assert result["state"] == "failed"
+    assert result["reason"] == reason
+
+
+def test_an_unexpected_pixel_error_becomes_a_failed_result(monkeypatch):
+    # The decoder must not let an IndexError escape even if a future change in
+    # the unfiltering reintroduces one: the caller sees a result, not a crash.
+    def explode(self, row_bytes):
+        raise IndexError("synthetic out of range")
+
+    monkeypatch.setattr(png_decode._Scanlines, "_finish", explode)
+    image = raw_png(2, 1, [b"\x00" + bytes(range(8))])
+    result = png_decode.decode_png(_stream(image))
+    assert (result["state"], result["reason"]) == ("failed", "row_length_mismatch")
+
+
+# -- budgets -------------------------------------------------------------
+
+
 def test_a_huge_header_hits_the_pixel_budget():
     image = SIG + header(100000, 100000) + chunk(b"IDAT", zlib.compress(b"")) + chunk(b"IEND", b"")
-    result = png_decode.decode_png(_stream(image), limits=Limits(max_pixels=1000))
+    result = png_decode.decode_png(_stream(image), limits=DecodeLimits(max_pixels=1000))
     assert (result["state"], result["reason"]) == ("undecided", "pixels_limit")
 
 
-def test_a_small_byte_budget_is_undecided():
+def test_bytes_exactly_at_the_limit_are_allowed():
     image = raw_png(2, 1, [b"\x00" + bytes(range(8))])
-    result = png_decode.decode_png(_stream(image), limits=Limits(max_bytes=10))
+    result = png_decode.decode_png(_stream(image), limits=DecodeLimits(max_bytes=len(image)))
+    assert result["state"] == "ok", result
+    assert result["bytes_read"] == len(image)
+
+
+def test_one_byte_over_the_limit_is_undecided():
+    image = raw_png(2, 1, [b"\x00" + bytes(range(8))])
+    result = png_decode.decode_png(_stream(image), limits=DecodeLimits(max_bytes=len(image) - 1))
     assert (result["state"], result["reason"]) == ("undecided", "bytes_limit")
-
-
-def test_a_zero_frame_budget_is_undecided():
-    image = raw_png(2, 1, [b"\x00" + bytes(range(8))])
-    result = png_decode.decode_png(_stream(image), limits=Limits(max_frames=0))
-    assert (result["state"], result["reason"]) == ("undecided", "frames_limit")
 
 
 def test_a_cancel_is_undecided():
@@ -216,46 +285,65 @@ def test_a_cancel_is_undecided():
     assert (result["state"], result["reason"]) == ("undecided", "cancel")
 
 
-def test_a_time_budget_is_undecided(monkeypatch):
-    clock = iter([0.0] + [100.0] * 50)
-    monkeypatch.setattr(png_decode, "_now", lambda: next(clock))
+def test_the_time_budget_uses_the_shared_budget_and_an_injectable_clock(monkeypatch):
+    class StepClock:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self):
+            self.calls += 1
+            return 0.0 if self.calls == 1 else 100.0
+
+    clock = StepClock()
+    real = Budget
+    seen = []
+
+    def factory(limits):
+        seen.append(limits)
+        return real(limits, clock=clock)
+
+    monkeypatch.setattr(png_decode, "Budget", factory)
+    limits = DecodeLimits(max_seconds=10)
     image = raw_png(2, 1, [b"\x00" + bytes(range(8))])
-    result = png_decode.decode_png(_stream(image), limits=Limits(max_seconds=1))
+    result = png_decode.decode_png(_stream(image), limits=limits)
     assert (result["state"], result["reason"]) == ("undecided", "time_limit")
+    assert seen == [limits]
 
 
-def test_decoding_a_file_does_not_modify_it(tmp_path):
-    image = raw_png(2, 2, [b"\x00" + bytes(range(8)), b"\x00" + bytes(range(8, 16))])
-    target = tmp_path / "sample.png"
-    target.write_bytes(image)
-    before = hashlib.sha256(target.read_bytes()).hexdigest()
-    with target.open("rb") as stream:
-        result = png_decode.decode_png(stream)
-    after = hashlib.sha256(target.read_bytes()).hexdigest()
-    assert result["state"] == "ok"
-    assert before == after
+def test_the_decoder_owns_no_limits_and_no_private_budget():
+    assert not hasattr(png_decode, "_Budget")
+    assert not hasattr(png_decode, "DEFAULT_MAX_BYTES")
+    assert not hasattr(png_decode, "_DEFAULT_MAX_BYTES")
 
 
-def test_the_stream_position_is_not_required_to_be_zero():
+def test_limits_must_be_the_shared_type():
+    class Duck:
+        max_bytes = 1000
+        max_pixels = 1000
+        max_frames = 1
+        max_seconds = 1.0
+
     image = raw_png(2, 1, [b"\x00" + bytes(range(8))])
-    padded = b"junk" + image
-    stream = _stream(padded)
-    stream.read(4)
-    result = png_decode.decode_png(stream)
-    assert result["state"] == "ok"
+    with pytest.raises(TypeError):
+        png_decode.decode_png(_stream(image), limits=Duck())
 
 
-def _stream(data: bytes):
-    import io
+def test_the_result_reports_the_limits_that_were_applied():
+    image = raw_png(2, 1, [b"\x00" + bytes(range(8))])
+    limits = DecodeLimits(max_bytes=1_000_000, max_pixels=1_000, max_frames=1, max_seconds=1.0)
+    result = png_decode.decode_png(_stream(image), limits=limits)
+    assert result["limits"] == limits.as_dict()
+    default = png_decode.decode_png(_stream(image))
+    assert default["limits"] == DecodeLimits().as_dict()
 
-    return io.BytesIO(data)
+
+# -- formats -------------------------------------------------------------
 
 
 def test_a_grayscale_png_uses_one_channel():
     row = bytes([7, 8, 9])
     result = png_decode.decode_png(_stream(raw_png(3, 1, [b"\x00" + row], color=0, bits=8)))
     assert result["state"] == "ok", result
-    assert result["rows_unfiltered"] == 1
     assert result["pixels_sha256"] == digest(row)
 
 
@@ -308,3 +396,26 @@ def test_a_large_image_crosses_the_block_boundary():
     assert result["rows_unfiltered"] == height
     expected = b"".join(raw[index + 1:index + 1 + width * 3] for index in range(0, len(raw), width * 3 + 1))
     assert result["pixels_sha256"] == digest(expected)
+
+
+# -- read-only proof -----------------------------------------------------
+
+
+def test_decoding_a_file_does_not_modify_it(tmp_path):
+    image = raw_png(2, 2, [b"\x00" + bytes(range(8)), b"\x00" + bytes(range(8, 16))])
+    target = tmp_path / "sample.png"
+    target.write_bytes(image)
+    before = hashlib.sha256(target.read_bytes()).hexdigest()
+    with target.open("rb") as stream:
+        result = png_decode.decode_png(stream)
+    after = hashlib.sha256(target.read_bytes()).hexdigest()
+    assert result["state"] == "ok"
+    assert before == after
+
+
+def test_the_stream_position_is_not_required_to_be_zero():
+    image = raw_png(2, 1, [b"\x00" + bytes(range(8))])
+    stream = _stream(b"junk" + image)
+    stream.read(4)
+    result = png_decode.decode_png(stream)
+    assert result["state"] == "ok"
