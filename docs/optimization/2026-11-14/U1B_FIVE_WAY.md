@@ -2,6 +2,9 @@
 
 基线：`a9fc470`。本轮只做 **U1-B**（依赖与发布可回退性），拆成 5 条文件不重叠的子节点并发推进；主线程负责组合器、CLI 与文档。
 
+> **2026-11-15 状态更新**：报告 schema 已从 1 升到 2（新增输入完整性 `inputs.declared/imports/environment`、`verdict`/`exit`/`ingest_incomplete`、带来源行号的 `constraints` 视图；输入不完整退出 3、已证实冲突退出 2）。
+> 本文下面关于组合器与退出码的描述仍是 schema 1 的历史口径，**现行契约以 [FIX_CONTRACTS §4](../2026-11-15/FIX_CONTRACTS.md) 为准**；历史维护记录 `docs/maintenance/2026-11-14_u1b_dependency_maintenance.md` 描述的是 schema 1 那次运行，保留原文不改。
+
 ## 0. 冻结的模块契约（5 条 lane 必须各自实现其中一个，接口不许改）
 
 ```text
