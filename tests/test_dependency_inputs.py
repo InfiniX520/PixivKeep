@@ -316,6 +316,9 @@ def test_the_applicable_declaration_decides_when_a_name_is_declared_twice():
     rows = matrix.constraints(view)
     assert rows[0]["applies"] == [">=2"]
     assert rows[0]["excluded"][0]["specifier"] == ">=1"
+    # The applicable declaration is the one that speaks for the name, so the
+    # unused question still gets an answer.
+    assert result["unused_declared"] == [{"name": "example"}]
 
 
 def test_a_missing_runtime_dependency_without_a_marker_is_still_attention():
@@ -324,14 +327,24 @@ def test_a_missing_runtime_dependency_without_a_marker_is_still_attention():
     assert result["verdict"] == "attention"
 
 
-def test_an_inapplicable_declaration_of_an_installed_package_is_still_unused():
-    """Scope note: only missing / mismatch / verdict ignore inapplicable rows.
+def test_an_inapplicable_declaration_of_an_installed_package_is_not_unused():
+    """A Linux-only row installed on Windows is not a declaration to delete.
 
-    unused_declared is untouched by this rule on purpose - whether a
-    platform-specific declaration should also be hidden there is a separate
-    decision for the integrator.
+    Reporting it as unused would be the same false alarm as reporting it as
+    missing, just pointing the other way: the user would remove a dependency
+    that the Linux build needs.
     """
     view = runtime_view(">=1 ; sys_platform == 'linux'")
+    result = matrix.compare(view, installed_view(("example", "2.0")), {"modules": []})
+    assert result["verdict"] == "ok"
+    assert result["unused_declared"] == []
+    rows = matrix.constraints(view)
+    assert rows[0]["excluded"][0]["reason"].startswith("marker_not_applicable:")
+
+
+def test_an_applicable_declaration_of_an_installed_package_is_still_unused():
+    """Positive control: the unused list is not simply switched off."""
+    view = runtime_view(">=1")
     result = matrix.compare(view, installed_view(("example", "2.0")), {"modules": []})
     assert result["verdict"] == "ok"
     assert result["unused_declared"] == [{"name": "example"}]
