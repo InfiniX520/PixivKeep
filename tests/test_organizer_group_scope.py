@@ -6,7 +6,12 @@ import copy
 import pytest
 
 from organizer.common import OrganizerError
-from organizer.group_scope import GroupScope, build_scope, ensure_current
+from organizer.group_scope import (
+    AmbiguousGroupError,
+    GroupScope,
+    build_scope,
+    ensure_current,
+)
 
 
 def artist(artist_id, groups, *, visibility="0", is_following=None):
@@ -175,7 +180,7 @@ def test_the_snapshot_is_not_modified():
 def test_bad_group_arguments_are_named_not_guessed():
     data = snapshot(three_artists())
     for groups, code in (([], "scope_requires_group"),
-                         (["a", "a"], "scope_group_duplicate"),
+                         (["landscape", "landscape"], "scope_group_duplicate"),
                          ("a", "scope_groups_invalid"),
                          ([1], "invalid_text")):
         with pytest.raises(OrganizerError) as caught:
@@ -217,4 +222,75 @@ def test_the_scope_serialises_and_its_overlap_is_read_only():
 def test_mixed_visibility_is_reported_as_mixed():
     data = {"1001": artist("1001", ["a"], visibility="0"),
             "1002": artist("1002", ["a"], visibility="1")}
-    assert build_scope(snapshot(data), groups=["a"]).source["visibility"] == "mixed"
+    scope = build_scope(snapshot(data), groups=[("show", "a"), ("hide", "a")])
+    assert scope.source["visibility"] == "mixed"
+    assert scope.artist_ids == ("1001", "1002")
+
+
+def two_sides_same_name():
+    return {
+        "1001": artist("1001", ["family"], visibility="0"),
+        "1002": artist("1002", ["family"], visibility="1"),
+    }
+
+
+def test_a_bare_name_on_both_sides_is_ambiguous():
+    with pytest.raises(AmbiguousGroupError) as caught:
+        build_scope(snapshot(two_sides_same_name()), groups=["family"])
+    assert caught.value.code == "group_ambiguous:family"
+    assert caught.value.group == "family"
+    assert isinstance(caught.value, OrganizerError)
+
+
+def test_an_explicit_pair_takes_only_its_own_side():
+    data = snapshot(two_sides_same_name())
+    public = build_scope(data, groups=[("show", "family")])
+    private = build_scope(data, groups=[("hide", "family")])
+    assert public.artist_ids == ("1001",)
+    assert private.artist_ids == ("1002",)
+    assert public.fingerprint != private.fingerprint
+    assert public.source["visibility"] == "show"
+    assert private.source["visibility"] == "hide"
+
+
+def test_two_empty_groups_with_the_same_name_still_differ_by_side():
+    data = snapshot(
+        {},
+        memberships={"show": {"family": {}}, "hide": {"family": {}}},
+    )
+    public = build_scope(data, groups=[("show", "family")])
+    private = build_scope(data, groups=[("hide", "family")])
+    assert public.artist_ids == private.artist_ids == ()
+    assert public.fingerprint != private.fingerprint
+
+
+def test_the_scope_records_which_pairs_it_covers():
+    scope = build_scope(snapshot(two_sides_same_name()),
+                        groups=[("hide", "family"), ("show", "family")])
+    assert scope.group_pairs == (("hide", "family"), ("show", "family"))
+    assert scope.groups == ("family",)
+    assert scope.as_dict()["group_pairs"] == [["hide", "family"], ["show", "family"]]
+
+
+def test_a_pair_for_a_side_without_that_group_is_refused():
+    with pytest.raises(OrganizerError) as caught:
+        build_scope(snapshot(two_sides_same_name()), groups=[("hide", "strangers")])
+    assert caught.value.code == "group_not_found"
+
+
+def test_an_unknown_visibility_is_refused_instead_of_guessed():
+    with pytest.raises(OrganizerError) as caught:
+        build_scope(snapshot(two_sides_same_name()), groups=[("public", "family")])
+    assert caught.value.code == "scope_group_invalid"
+
+
+def test_same_side_groups_still_union_and_overlap_by_name():
+    data = {
+        "1001": artist("1001", ["one"]),
+        "1002": artist("1002", ["one", "two"]),
+        "1003": artist("1003", ["two"]),
+    }
+    scope = build_scope(snapshot(data), groups=["one", "two"])
+    assert scope.artist_ids == ("1001", "1002", "1003")
+    assert scope.overlap == {"1002": ("one", "two")}
+    assert scope.group_pairs == (("show", "one"), ("show", "two"))
