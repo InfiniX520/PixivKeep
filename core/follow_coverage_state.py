@@ -28,10 +28,12 @@ delivery     <given>   facts["delivery"] carries a valid state
                        outranks an unknown one), or run not completed, or a
                        finished run that saved fewer pages than it should have
              missing   the same shortfall when nothing at all was saved
-             unknown   no usable pages_saved count: "saved" was never measured,
-                       and an unmeasured fact is not a complete delivery
-             complete  run finished, every artist finished, pages_saved present
-                       and not below works_seen - excluded_by_filter
+             unknown   saving_not_measured: pages_saved itself is absent;
+                       saving_not_provable:<key>: works_seen or excluded_by_filter
+                       is absent, so "how many pages should exist" cannot be
+                       computed and pages_saved cannot be called complete
+             complete  run finished, every artist finished, all three counts
+                       present and works_seen - excluded_by_filter <= pages_saved
 """
 from __future__ import annotations
 
@@ -157,15 +159,6 @@ def _count(value: object) -> int | None:
     return value
 
 
-def _expected_pages(totals: Mapping[str, Any]) -> int | None:
-    """How many pages this scope should have produced, when it is provable."""
-    seen = _count(totals.get("works_seen"))
-    excluded = _count(totals.get("excluded_by_filter"))
-    if seen is None or excluded is None:
-        return None
-    return max(0, seen - excluded)
-
-
 def _delivery(run: Mapping[str, Any], artists: list[Mapping[str, Any]], facts: Mapping[str, Any]) -> dict[str, Any]:
     given = _given(facts, "delivery")
     if given is not None:
@@ -199,8 +192,16 @@ def _delivery(run: Mapping[str, Any], artists: list[Mapping[str, Any]], facts: M
         # The enumeration may be finished, but "saved" was never measured:
         # an unmeasured side cannot be reported as a complete delivery.
         return {"state": "unknown", "reason": "saving_not_measured"}
-    expected = _expected_pages(totals)
-    if expected is not None and expected > saved:
+    seen = _count(totals.get("works_seen"))
+    if seen is None:
+        # Without the number of works there is no denominator, and a delivery
+        # cannot be called complete against a denominator nobody measured.
+        return {"state": "unknown", "reason": "saving_not_provable:works_seen"}
+    excluded = _count(totals.get("excluded_by_filter"))
+    if excluded is None:
+        return {"state": "unknown", "reason": "saving_not_provable:excluded_by_filter"}
+    expected = max(0, seen - excluded)
+    if expected > saved:
         short = expected - saved
         if saved == 0:
             return {"state": "missing", "reason": "pages_not_saved:%d" % short}

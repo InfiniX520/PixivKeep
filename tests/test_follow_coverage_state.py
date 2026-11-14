@@ -32,7 +32,10 @@ def artist(artist_id="a-1", state="completed", pages=3):
 
 def test_a_finished_walk_is_complete_on_all_three_dimensions():
     states = coverage_states(
-        facts(artists=[artist("a-1"), artist("a-2")], totals={"excluded_by_filter": 4, "unknown_fields": 0, "pages_saved": 9})
+        facts(
+            artists=[artist("a-1"), artist("a-2")],
+            totals={"works_seen": 13, "excluded_by_filter": 4, "unknown_fields": 0, "pages_saved": 9},
+        )
     )
     assert states["enumeration"] == {"state": "complete", "reason": None}
     assert states["decision"] == {"state": "applied", "reason": None}
@@ -68,7 +71,10 @@ def test_a_running_walk_is_partial_and_says_why():
 
 def test_unfollowed_artists_never_block_completion():
     states = coverage_states(
-        facts(artists=[artist("a-1"), artist("a-2", state="unfollowed")], totals={"pages_saved": 3})
+        facts(
+            artists=[artist("a-1"), artist("a-2", state="unfollowed")],
+            totals={"works_seen": 3, "excluded_by_filter": 0, "pages_saved": 3},
+        )
     )
     assert states["enumeration"]["state"] == "complete"
     assert states["delivery"]["state"] == "complete"
@@ -139,6 +145,27 @@ def test_a_known_gap_outranks_the_unmeasured_saving_side():
     assert states["delivery"]["reason"] == "artist_pending:a-1"
 
 
+def test_a_missing_works_seen_count_is_unknown_even_with_pages_saved():
+    states = coverage_states(facts(artists=[artist("a-1")], totals={"excluded_by_filter": 15, "pages_saved": 19}))
+    assert states["delivery"] == {"state": "unknown", "reason": "saving_not_provable:works_seen"}
+
+
+def test_a_missing_exclusion_count_is_unknown_not_complete():
+    states = coverage_states(facts(artists=[artist("a-1")], totals={"works_seen": 20, "pages_saved": 2}))
+    assert states["delivery"] == {"state": "unknown", "reason": "saving_not_provable:excluded_by_filter"}
+
+
+def test_three_complete_counts_that_add_up_are_complete():
+    states = coverage_states(
+        facts(artists=[artist("a-1")], totals={"works_seen": 34, "excluded_by_filter": 15, "pages_saved": 19})
+    )
+    assert states["delivery"] == {"state": "complete", "reason": None}
+
+
+def test_saving_not_measured_still_wins_when_pages_saved_itself_is_absent():
+    states = coverage_states(facts(artists=[artist("a-1")], totals={"works_seen": 20, "excluded_by_filter": 5}))
+    assert states["delivery"] == {"state": "unknown", "reason": "saving_not_measured"}
+
 def test_an_unfinished_run_cannot_claim_complete_delivery():
     states = coverage_states(facts(status="running", artists=[artist("a-1", state="completed")]))
     assert states["delivery"]["state"] == "partial"
@@ -184,7 +211,7 @@ def test_a_supplied_dimension_outside_the_vocabulary_is_refused():
 
 
 def test_every_returned_state_belongs_to_its_own_vocabulary():
-    states = coverage_states(facts(artists=[artist("a-1")], totals={"excluded_by_filter": 1, "pages_saved": 1}))
+    states = coverage_states(facts(artists=[artist("a-1")], totals={"works_seen": 1, "excluded_by_filter": 0, "pages_saved": 1}))
     assert states["enumeration"]["state"] in ENUMERATION_STATES
     assert states["decision"]["state"] in DECISION_STATES
     assert states["delivery"]["state"] in DELIVERY_STATES
