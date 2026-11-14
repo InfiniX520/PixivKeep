@@ -92,6 +92,60 @@ class TemporaryWorkspace:
             raise WorkspaceError("workspace_not_a_plain_directory: %s" % directory)
         return cls(directory, purpose, _key(info))
 
+    def release(self, name: str) -> None:
+        """Forget a claimed member that was never written, and remove it.
+
+        claim() creates the file before the caller knows the source can be read.
+        When the source turns out to be gone, the empty file must not stay in a
+        successful run: it is still the object this run created (same key), so
+        removing it here is within the same ownership claim.
+        """
+        member = self._members.pop(name, None)
+        if member is None:
+            return
+        target = self.path / name
+        try:
+            info = os.lstat(target)
+        except OSError:
+            return
+        if is_reparse_point(info) or _key(info) != member.key:
+            return
+        try:
+            os.unlink(target)
+        except OSError:
+            pass
+
+
+    def claim(self, name: str, *, kind: str = "file") -> Path:
+        """Create one member exclusively and record it *before* it has content.
+
+        A copy that fails halfway leaves a file this run created.  Creating it
+        through the workspace means the cleanup already knows it, so a failure
+        cannot turn our own half-written file into an unowned stranger that has
+        to be kept forever.
+        """
+        if not isinstance(name, str) or not name or name in {".", ".."}:
+            raise WorkspaceError("workspace_member_invalid: %r" % (name,))
+        if "/" in name or "\\" in name:
+            raise WorkspaceError("workspace_member_invalid: %r" % (name,))
+        target = self.path / name
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_BINARY", 0)
+        handle = os.open(target, flags, 0o600)
+        try:
+            info = os.fstat(handle)
+        finally:
+            os.close(handle)
+        self._members[name] = _Member(
+            name=name,
+            kind=kind,
+            key=_key(info),
+            size=int(info.st_size),
+            mtime_ns=int(getattr(info, "st_mtime_ns", 0) or 0),
+        )
+        return target
+
+
     def record(self, name: str, *, kind: str = "file", required: bool = True) -> bool:
         """Record one member this run has just created; True when it exists.
 
@@ -141,10 +195,12 @@ class TemporaryWorkspace:
             "removed": [],
             "kept": [],
             "errors": [],
+            "incomplete": [],
         }
         removed: list[str] = result["removed"]  # type: ignore[assignment]
         kept: list[dict[str, str]] = result["kept"]  # type: ignore[assignment]
         errors: list[str] = result["errors"]  # type: ignore[assignment]
+        incomplete: list[str] = result["incomplete"]  # type: ignore[assignment]
 
         try:
             current = os.lstat(self.path)
@@ -174,9 +230,15 @@ class TemporaryWorkspace:
             if is_reparse_point(info):
                 kept.append({"name": name, "reason": "reparse"})
                 continue
-            if not _same(member, info):
+            if _key(info) != member.key:
+                # A different object now sits under that name: not ours.
                 kept.append({"name": name, "reason": "replaced"})
                 continue
+            if not _same(member, info):
+                # Same object, different bytes: this run created it and wrote
+                # into it, then stopped.  It is ours to remove, and the report
+                # says it was incomplete rather than borrowed.
+                incomplete.append(name)
             try:
                 if member.kind == "dir":
                     os.rmdir(target)
@@ -212,6 +274,8 @@ class TemporaryWorkspace:
             result["state"] = "partial" if removed else "failed"
         elif kept:
             result["state"] = "kept"
+        elif incomplete:
+            result["state"] = "partial"
         else:
             result["state"] = "ok"
         return result
@@ -225,6 +289,9 @@ def describe(cleanup: object) -> str:
     removed = len(cleanup.get("removed") or [])
     kept = cleanup.get("kept") or []
     text = "cleanup=%s removed=%d" % (state, removed)
+    incomplete = cleanup.get("incomplete") or []
+    if incomplete:
+        text += " incomplete=%d (%s)" % (len(incomplete), ",".join(incomplete[:5]))
     if kept:
         reasons = ",".join(sorted({str(item.get("reason")) for item in kept}))
         text += " kept=%d (%s) residual=%s" % (len(kept), reasons, cleanup.get("path"))

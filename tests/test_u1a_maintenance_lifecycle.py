@@ -240,7 +240,11 @@ def test_a_late_manifest_failure_is_typed_and_names_the_residual(tmp_path, monke
         m.backup_library(source, tmp_path / "backups", label="late")
     assert info.value.code == "backup_manifest_failed"
     assert "disk full" in info.value.detail
-    assert "residual=" in info.value.detail
+    # The failure must say what happened to the directory it created: either the
+    # cleanup removed everything it owned, or it names the residual path.
+    assert "cleanup=" in info.value.detail
+    if "cleanup=ok" not in info.value.detail:
+        assert "residual=" in info.value.detail
 
 
 def test_a_cleanup_failure_cannot_replace_the_primary_error(tmp_path, monkeypatch):
@@ -371,3 +375,52 @@ def test_restore_check_still_reports_a_missing_file(tmp_path):
     report = m.restore_check(tmp_path / "absent.sqlite3")
     assert report["state"] == "library_missing"
     assert report["exit_code"] == 2
+
+
+def test_an_adopt_failure_is_an_unreadable_exit_without_a_traceback(tmp_path, monkeypatch, capsys):
+    directory = backup(tmp_path)
+
+    class Refusing:
+        @staticmethod
+        def adopt(*args, **kwargs):
+            raise m.WorkspaceError("synthetic adopt failure")
+
+    monkeypatch.setattr(m, "TemporaryWorkspace", Refusing)
+    code = m.main(["--json", "verify", str(directory)])
+    printed = capsys.readouterr().out
+    result = json.loads(printed)
+    assert code == 3
+    assert result["ok"] is False
+    assert result["status"] == "error"
+    assert "verify_workspace_unavailable" in result["reasons"]
+    assert "Traceback" not in printed
+
+
+def test_a_copy_that_fails_halfway_leaves_nothing_behind(tmp_path, monkeypatch):
+    directory = backup(tmp_path)
+
+    def failing(source, destination):
+        with open(destination, "r+b") as stream:
+            stream.write(b"x" * 4096)
+        raise OSError("synthetic write failure")
+
+    monkeypatch.setattr(m, "_copy_and_hash", failing)
+    with pytest.raises(m.LibraryMaintenanceError):
+        m.verify_backup(directory)
+    leftovers = sorted(directory.parent.glob(directory.name + ".verify-*"))
+    assert leftovers == []
+
+
+def test_an_interrupt_during_cleanup_keeps_its_own_type(tmp_path, monkeypatch):
+    source = h.make_library(tmp_path / "source" / "library.sqlite3", jobs=1)
+
+    def failing(*args, **kwargs):
+        raise OSError("synthetic copy failure")
+
+    def interrupting(*args, **kwargs):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(m, "_online_snapshot", failing)
+    monkeypatch.setattr(m, "_discard", interrupting)
+    with pytest.raises(KeyboardInterrupt):
+        m.backup_library(source, tmp_path / "backups", label="interrupted")

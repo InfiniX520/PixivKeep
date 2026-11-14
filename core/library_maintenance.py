@@ -483,7 +483,8 @@ def _comparable(group: dict[str, dict[str, object]]) -> dict[str, object]:
 def _copy_file(source: Path, destination: Path) -> dict[str, object]:
     digest = hashlib.sha256()
     total = 0
-    with source.open("rb") as reader, destination.open("xb") as writer:
+    with source.open("rb") as reader, destination.open("r+b") as writer:
+        writer.truncate(0)
         while True:
             chunk = reader.read(_CHUNK_BYTES)
             if not chunk:
@@ -523,7 +524,7 @@ def _safe_cleanup(workspace: TemporaryWorkspace) -> dict[str, object]:
     """Cleanup must never replace the failure that made it necessary."""
     try:
         return _discard(workspace)
-    except BaseException as error:  # a cleanup failure is data, not a new crash
+    except Exception as error:  # a cleanup failure is data, not a new crash
         return {
             "state": "failed",
             "path": str(workspace.path),
@@ -767,6 +768,9 @@ def _online_snapshot(
         destination.close()
     for suffix in ("-wal", "-shm"):
         workspace.record(target.name + suffix, required=False)
+    # The snapshot is complete now: record its final size and time so a later
+    # cleanup can tell an unfinished copy from this finished one.
+    workspace.record(target.name)
     leftovers = [
         suffix
         for suffix in ("-wal", "-shm")
@@ -798,25 +802,32 @@ def _file_group_copy(
         entry = group[suffix]
         if not entry["present"]:
             continue
-        try:
-            fact = _copy_file(
-                Path(str(source) + suffix), target / (source.name + suffix)
-            )
-        except FileNotFoundError:
+        source_path = Path(str(source) + suffix)
+        if not source_path.is_file():
+            # Same three cases the copy used to discover by opening: a -shm
+            # disappears first, an empty -wal may vanish, anything else means
+            # the source moved and no copy may vouch for it.
             if suffix == "-shm":
-                # The shared-memory index is rebuilt from the WAL on the next
-                # open; it is not library content and already sits outside the
-                # comparison, so its disappearance loses nothing.
                 continue
             if suffix == "-wal" and int(entry["bytes"]) == 0:
-                # An empty -wal can disappear when the reader that created it
-                # closes.  It carried no frames, so there is nothing to lose.
                 continue
-            # A WAL that held frames, or the database itself, cannot vanish
-            # without the source having moved; no copy may vouch for that.
+            raise FileNotFoundError(str(source_path))
+        destination = workspace.claim(source.name + suffix)
+        try:
+            fact = _copy_file(source_path, destination)
+        except FileNotFoundError:
+            # The source vanished between the check and the open: the empty
+            # member we just claimed was never written, so it goes away again.
+            workspace.release(source.name + suffix)
+            if suffix == "-shm":
+                continue
+            if suffix == "-wal" and int(entry["bytes"]) == 0:
+                continue
+            # A log that held frames cannot vanish without the source having
+            # moved; no copy may vouch for that.
             raise
         files.append(fact)
-        # The copy just created this name; recording it is what makes it ours.
+        # Recording again refreshes the identity after the write.
         workspace.record(fact["name"])
     return files
 
@@ -1525,7 +1536,8 @@ def _copy_and_hash(source: Path, destination: Path) -> dict[str, object]:
     total = 0
     with source.open("rb") as reader:
         before = _identity(os.fstat(reader.fileno()))
-        with destination.open("xb") as writer:
+        with destination.open("r+b") as writer:
+            writer.truncate(0)
             while True:
                 chunk = reader.read(_CHUNK_BYTES)
                 if not chunk:
@@ -1625,9 +1637,13 @@ def _seal_members(
         # has a ~15.6 ms tick, which quantises a small copy into 0.0 and makes
         # the evidence unreadable.
         started = time.perf_counter()
+        destination = ws.claim(name)
         try:
-            copied = _copy_and_hash(path, workspace / name)
+            copied = _copy_and_hash(path, destination)
         except FileNotFoundError:
+            # The source vanished between the check and the copy: the member
+            # we claimed was never written, so it is released, not kept.
+            ws.release(name)
             after[name] = _path_identity(path)
             facts.append(fact)
             states.append("missing")
@@ -1832,11 +1848,19 @@ def verify_backup(
     evidence["unexpected_members"] = unexpected
 
     workspace: Path | None = None
+    ws: TemporaryWorkspace | None = None
     try:
         try:
             workspace, where = _verification_workspace(root)
             ws = TemporaryWorkspace.adopt(workspace, purpose="verify")
-        except OSError as error:
+        except (OSError, WorkspaceError) as error:
+            # The directory exists but cannot be described (or was never
+            # created).  Either way it is not ours to remove: name it and stop
+            # using it, so the finally below has nothing to clean.
+            if workspace is not None:
+                warnings.append("verify_workspace_unowned")
+                evidence["left_behind"] = str(workspace)
+                workspace = None
             reasons.append("verify_workspace_unavailable")
             warnings.append("verify_workspace_unavailable")
             evidence["workspace"] = "unavailable"
@@ -1901,7 +1925,7 @@ def verify_backup(
             if stability == "changed":
                 reasons.append("changed_during_check")
     finally:
-        if workspace is not None:
+        if ws is not None:
             # The cleanup is a fact about this run's own directory, not about
             # the backup: it is reported next to the verdict and never turns a
             # sound backup into a broken one.
@@ -2040,6 +2064,10 @@ def verify_backup(
         "evidence": evidence,
         "ok": bool(ok),
         "exit_code": _verify_exit_code(bool(ok), reasons),
+        # exit_code 3 means 'nothing was compared'.  The report keeps its facts
+        # and also carries the error marker the other commands use, so a reader
+        # does not mistake an unobserved backup for a disagreement about content.
+        "status": "error" if _verify_exit_code(bool(ok), reasons) == 3 else None,
         "reasons": sorted(set(reasons)),
         "warnings": sorted(set(warnings)),
         "checked_at": _now_utc(),
@@ -2856,7 +2884,6 @@ def main(argv: list[str] | None = None) -> int:
             # The walk owns the answer.  The old per-page outcome helper that
             # re-derived it was deleted with the WR-03 hole (a bare continuation
             # at the end of the ledger came back as 0).
-            # (a continuation at the end would come back as 0).
             code = int(report["exit_code"])
             lines = _scan_scope_lines(report) + _scan_lines(
                 report, continuation=cursor is not None
