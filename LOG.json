@@ -2309,7 +2309,7 @@
     {
       "id": "JPGPNG-U1U2-AUDIT-FIX-20261115-01",
       "session_date": "2026-11-15",
-      "status": "audit_findings_fixed_reaudited_no_code_p1",
+      "status": "wiring_and_e1_offline_done_pending_user_audit",
       "summary": "Fixed the 1 P1 + 7 P2 from the 031627c independent audit: ownership now spans create/write/SQLite/cleanup with claim identity checked before any write and sidecars retained when unprovable; the quality engine has one command-wide budget, a content version with path stability, four transport states and palette-bounds checking; coverage separates works from pages and only calls delivery complete when page evidence exists; the dependency report is schema 2 with input completeness in the exit code and every applicable constraint aggregated.",
       "audited_commit": "031627c64eb2aac5605b05a21a47a7c0b3c5fef2",
       "product_baseline": "4ba891e",
@@ -2322,17 +2322,17 @@
           "before": "15 failed / 2 passed"
         },
         "full_matrix": {
-          "tests": 3099,
+          "tests": 3316,
           "failed": 0,
           "errors": 0,
           "skipped": 4,
-          "seconds": 626.56
+          "seconds": 772.99
         },
         "tk_modules": {
           "view": 25,
           "collection": 4,
           "source": 5,
-          "note": "no retry needed on the final run"
+          "note": "no retry needed after the -s fix"
         },
         "independent_reaudit": {
           "range": "031627c..e54eeb9",
@@ -2347,16 +2347,30 @@
           "closure": 14,
           "boundaries": 10,
           "w5w6": 12
+        },
+        "wiring": {
+          "coverage_command": "read-only, exit 0/2/5/3",
+          "filter_explain_command": "read-only",
+          "ui": "coverage page + why-not-downloaded"
+        },
+        "e1_offline": {
+          "batches": 35,
+          "rules": 33,
+          "group_scope": 30,
+          "conflicts": 21,
+          "report": 26,
+          "chain": 9,
+          "offline_cli": 22
         }
       },
       "new_findings": [],
       "previous_product_findings_open": [],
       "open_risks": [
-        "Tk Tcl initialisation flake (pre-existing) is still not root-caused",
-        "log-view 10 ms flush race (pre-existing) can fail once under load",
-        "a failed file-group backup now keeps SQLite sidecars it cannot prove it owns",
-        "coverage and filter engines are not wired into the UI or a CLI yet",
-        "JPEG/GIF/WebP strict decode stays capability_unavailable (no component installed)"
+        "real account write-back, the E1-3 pilot and A2-A5 upload still need the user",
+        "JPEG/GIF/WebP strict decode stays capability_unavailable until a decoder is approved",
+        "the coverage command cannot reach exit 0 today: crawl facts carry no page evidence",
+        "a failed file-group backup keeps sidecars it cannot prove it owns (no reclaim path yet)",
+        "Tk: the flake is pytest capture plus degraded Tcl state; -s removes it, cause not fixed upstream"
       ],
       "product_source_changed": true,
       "business_data_changed": false,
