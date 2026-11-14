@@ -43,11 +43,27 @@ def test_artists_are_sorted_and_unique():
         assert len(ids) == len(set(ids)), name
 
 
-def test_the_run_totals_agree_with_the_page_counts():
+def test_artist_pages_are_works_seen_not_pages_saved():
     for name, facts in _all().items():
         totals = facts["run"]["totals"]
+        seen = sum(artist["pages"] for artist in facts["artists"])
+        assert totals["works_seen"] == seen, name
         assert totals["works_seen"] == totals["pages_saved"] + totals["excluded_by_filter"], name
-        assert totals["pages_saved"] == sum(artist["pages"] for artist in facts["artists"]), name
+
+
+def test_at_least_one_fixture_proves_works_seen_differs_from_pages_saved():
+    differing = []
+    for name, facts in _all().items():
+        totals = facts["run"]["totals"]
+        seen = sum(artist["pages"] for artist in facts["artists"])
+        if seen != totals["pages_saved"]:
+            differing.append(name)
+    assert differing, "no fixture separates works seen from pages saved"
+    assert "all_filtered" in differing, "the extreme case must be one of them"
+    facts = fixtures.all_filtered()
+    totals = facts["run"]["totals"]
+    assert sum(artist["pages"] for artist in facts["artists"]) == 30
+    assert totals["pages_saved"] == 0
 
 
 def test_all_complete_has_nothing_pending():
@@ -57,10 +73,11 @@ def test_all_complete_has_nothing_pending():
     assert facts["run"]["status"] == "completed"
 
 
-def test_partial_failed_pages_names_the_failed_artist():
+def test_partial_failed_pages_names_the_failed_artist_that_saw_works():
     facts = fixtures.partial_failed_pages()
     failed = [artist for artist in facts["artists"] if artist["state"] == "failed"]
     assert failed, "the fixture must contain a failed artist"
+    assert failed[0]["pages"] > 0, "a failed artist still saw works"
     assert [item["artist_id"] for item in facts["incomplete"]] == [failed[0]["artist_id"]]
     assert facts["run"]["status"] == "completed", "a completed run with a failed artist is the trap"
 
@@ -89,11 +106,12 @@ def test_duplicate_pages_are_counted_and_bounded():
     assert totals["duplicate_pages"] <= totals["pages_saved"]
 
 
-def test_all_filtered_saves_nothing_and_fails_nothing():
+def test_all_filtered_saves_nothing_but_still_saw_works():
     facts = fixtures.all_filtered()
     totals = facts["run"]["totals"]
     assert totals["pages_saved"] == 0
     assert totals["excluded_by_filter"] == totals["works_seen"]
+    assert all(artist["pages"] > 0 for artist in facts["artists"])
     assert all(artist["state"] == "completed" for artist in facts["artists"])
     assert facts["incomplete"] == []
 
@@ -108,6 +126,7 @@ def test_empty_following_is_a_real_zero_not_a_null():
     facts = fixtures.empty_following()
     assert facts["artists"] == []
     assert facts["run"]["totals"]["total_artists"] == 0
+    assert facts["run"]["totals"]["works_seen"] == 0
     assert facts["incomplete"] == []
 
 

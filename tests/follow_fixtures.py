@@ -9,14 +9,21 @@ Each builder returns a plain dict shaped like the frozen A1 contract::
 
 Two things the contract did not spell out, and how they are carried here:
 
+* artist['pages'] is the number of works that artist showed this run - the
+  real A1 reads it from artist_progress.works_seen.  It is NOT the number of
+  pages saved: filters exclude works before any page is written, so
+  sum(pages) and pages_saved are different numbers on purpose.
 * run-level counters (works seen, pages saved, filtered, unknown fields,
   duplicate pages, already-verified pages) live in run['totals'].  A real
   FollowCrawlRun does not carry them either, so A1 is expected to fill
   totals from the run summary it already refreshes; A3 then prefers totals
   and falls back to summing the per-artist pages.  If that is the wrong home,
   the contract needs one more key rather than a guess here.
-* artist["pages"] is "pages this artist produced", not "pages read": the
-  coverage summary counts what was saved, and the run totals are the authority.
+
+Every fixture keeps these two identities true:
+
+    works_seen == sum(artist.pages)      (the artist list is the whole run)
+    works_seen == pages_saved + excluded_by_filter
 
 Nothing here touches a database or a real crawl.  The builders are
 deterministic and independent: no fixture imports A1-A4.
@@ -54,11 +61,11 @@ def _run(
     }
 
 
-def _artist(artist_id: str, state: str, pages: int, newest: str = "") -> dict[str, Any]:
+def _artist(artist_id: str, state: str, works: int, newest: str = "") -> dict[str, Any]:
     return {
         "artist_id": artist_id,
         "state": state,
-        "pages": int(pages),
+        "pages": int(works),  # works_seen for this artist
         "newest_illust_id": newest,
     }
 
@@ -78,18 +85,18 @@ def _facts(
 
 
 def all_complete() -> dict[str, Any]:
-    """Three artists finished, nothing pending, no budget pressure."""
+    """Three artists finished; some works were filtered, some were saved."""
     artists = [
-        _artist("1001", ARTIST_COMPLETED, 12, "9001"),
-        _artist("1002", ARTIST_COMPLETED, 7, "9002"),
+        _artist("1001", ARTIST_COMPLETED, 20, "9001"),
+        _artist("1002", ARTIST_COMPLETED, 14, "9002"),
         _artist("1003", ARTIST_COMPLETED, 0, ""),
     ]
     totals = {
         "total_artists": 3,
-        "works_seen": 41,
+        "works_seen": 34,
         "pages_saved": 19,
         "pages_already_verified": 0,
-        "excluded_by_filter": 22,
+        "excluded_by_filter": 15,
         "unknown_fields": 0,
         "duplicate_pages": 0,
     }
@@ -97,18 +104,18 @@ def all_complete() -> dict[str, Any]:
 
 
 def partial_failed_pages() -> dict[str, Any]:
-    """One artist lost a page; the run still says completed, which must not win."""
+    """One artist saw works but its pages failed; the run still says completed."""
     artists = [
-        _artist("1001", ARTIST_COMPLETED, 12, "9001"),
-        _artist("1002", ARTIST_FAILED, 3, "9002"),
+        _artist("1001", ARTIST_COMPLETED, 20, "9001"),
+        _artist("1002", ARTIST_FAILED, 8, "9002"),
         _artist("1003", ARTIST_COMPLETED, 0, ""),
     ]
     totals = {
         "total_artists": 3,
-        "works_seen": 33,
-        "pages_saved": 15,
+        "works_seen": 28,
+        "pages_saved": 13,
         "pages_already_verified": 0,
-        "excluded_by_filter": 18,
+        "excluded_by_filter": 15,
         "unknown_fields": 0,
         "duplicate_pages": 0,
     }
@@ -120,7 +127,7 @@ def partial_failed_pages() -> dict[str, Any]:
 
 
 def budget_stopped() -> dict[str, Any]:
-    """The batch hit its request budget; two artists were never finished."""
+    """The batch hit its request budget; two artists were never reached."""
     artists = [
         _artist("1001", ARTIST_COMPLETED, 12, "9001"),
         _artist("1002", ARTIST_PENDING, 0, ""),
@@ -150,12 +157,12 @@ def rate_limited_paused() -> dict[str, Any]:
     """A cooldown stopped the pass while the budget still had room."""
     artists = [
         _artist("1001", ARTIST_COMPLETED, 5, "9001"),
-        _artist("1002", ARTIST_RUNNING, 2, ""),
+        _artist("1002", ARTIST_RUNNING, 3, ""),
     ]
     totals = {
         "total_artists": 2,
-        "works_seen": 9,
-        "pages_saved": 7,
+        "works_seen": 8,
+        "pages_saved": 6,
         "pages_already_verified": 0,
         "excluded_by_filter": 2,
         "unknown_fields": 0,
@@ -170,17 +177,17 @@ def rate_limited_paused() -> dict[str, Any]:
 
 
 def duplicate_pages() -> dict[str, Any]:
-    """The same pages were accepted twice; coverage must not count them as new."""
+    """The same pages were accepted twice; duplicates must not inflate the total."""
     artists = [
-        _artist("1001", ARTIST_COMPLETED, 8, "9001"),
-        _artist("1002", ARTIST_COMPLETED, 6, "9002"),
+        _artist("1001", ARTIST_COMPLETED, 12, "9001"),
+        _artist("1002", ARTIST_COMPLETED, 8, "9002"),
     ]
     totals = {
         "total_artists": 2,
         "works_seen": 20,
-        "pages_saved": 14,
+        "pages_saved": 17,
         "pages_already_verified": 0,
-        "excluded_by_filter": 6,
+        "excluded_by_filter": 3,
         "unknown_fields": 0,
         "duplicate_pages": 3,
     }
@@ -188,10 +195,10 @@ def duplicate_pages() -> dict[str, Any]:
 
 
 def all_filtered() -> dict[str, Any]:
-    """Every work was excluded by the filters; nothing was saved, nothing failed."""
+    """Thirty works seen, all filtered out: sum(pages) is far from pages_saved."""
     artists = [
-        _artist("1001", ARTIST_COMPLETED, 0, "9001"),
-        _artist("1002", ARTIST_COMPLETED, 0, "9007"),
+        _artist("1001", ARTIST_COMPLETED, 18, "9001"),
+        _artist("1002", ARTIST_COMPLETED, 12, "9007"),
     ]
     totals = {
         "total_artists": 2,
@@ -208,7 +215,7 @@ def all_filtered() -> dict[str, Any]:
 def private_scope_missing() -> dict[str, Any]:
     """The run has no account reference, so the scope itself is unknown."""
     artists = [
-        _artist("1001", ARTIST_COMPLETED, 4, "9001"),
+        _artist("1001", ARTIST_COMPLETED, 6, "9001"),
     ]
     totals = {
         "total_artists": 1,
