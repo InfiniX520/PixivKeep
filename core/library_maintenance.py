@@ -59,7 +59,13 @@ from core.library_repository import (
     _validate_database_path,
 )
 from core.task_contracts import ContractError
-from core.workspace_ownership import TemporaryWorkspace, WorkspaceError
+from core.workspace_ownership import (
+    OWNED,
+    OwnershipClaim,
+    TemporaryWorkspace,
+    WorkspaceError,
+    verify_owned,
+)
 from core.workspace_ownership import describe as _describe_cleanup
 
 MANIFEST_VERSION = 2
@@ -98,6 +104,11 @@ class LibraryMaintenanceError(RuntimeError):
     def __init__(self, code: str, detail: str = "") -> None:
         self.code = code
         self.detail = detail
+        #: The cleanup of the workspace this call created, kept as a field of
+        #: its own.  A failure and what was left behind are two facts; folding
+        #: the second into the first's message makes it unreadable to a caller
+        #: that wants to act on it.
+        self.cleanup: dict[str, object] | None = None
         super().__init__(code if not detail else "%s: %s" % (code, detail))
 
 
@@ -480,11 +491,61 @@ def _comparable(group: dict[str, dict[str, object]]) -> dict[str, object]:
     return comparable
 
 
-def _copy_file(source: Path, destination: Path) -> dict[str, object]:
+def _owned_writer(destination: object) -> "object":
+    """Open the claimed destination and prove it *before* truncating a byte.
+
+    The proof is fstat on the descriptor that is about to be written through,
+    compared with the identity recorded at exclusive creation.  A name that was
+    replaced in the meantime makes the descriptor describe a stranger, so the
+    comparison fails and nothing in the stranger's file is touched.  A name
+    swapped after this point cannot affect the write: the bytes go through the
+    descriptor that was just verified.
+    """
+    claim = getattr(destination, "claim", None)
+    if not isinstance(claim, OwnershipClaim):
+        # No claim means no proof.  Refusing is the only honest answer: writing
+        # would be writing into a file this run cannot show it created.
+        raise WorkspaceError("copy_requires_claim: %r" % (destination,))
+    target: Path = claim.path
+    flags = os.O_RDWR | getattr(os, "O_BINARY", 0)
+    try:
+        handle = os.open(target, flags)
+    except FileNotFoundError:
+        raise WorkspaceError("claim_name_missing: %s" % target) from None
+    except OSError as error:
+        raise WorkspaceError(
+            "claim_unwritable: %s (%s)" % (target, type(error).__name__)
+        ) from None
+    state = verify_owned(claim, handle=handle)
+    if state["state"] != OWNED:
+        os.close(handle)
+        raise WorkspaceError(
+            "claim_not_owned: %s (%s)"
+            % (target, state.get("reason") or state["state"])
+        )
+    try:
+        stream = os.fdopen(handle, "r+b", buffering=0)
+        stream.seek(0)
+        stream.truncate(0)
+    except OSError:
+        try:
+            os.close(handle)
+        except OSError:
+            pass
+        raise
+    return stream
+
+
+def _copy_file(source: Path, destination: object) -> dict[str, object]:
+    """Copy into the object this run created, never into whatever the name says.
+
+    destination is a name the caller claimed exclusively; the claim is what
+    proves the name still describes that object.  The writer is opened and
+    verified before the first byte, so a replaced name receives nothing.
+    """
     digest = hashlib.sha256()
     total = 0
-    with source.open("rb") as reader, destination.open("r+b") as writer:
-        writer.truncate(0)
+    with source.open("rb") as reader, _owned_writer(destination) as writer:  # type: ignore[union-attr]
         while True:
             chunk = reader.read(_CHUNK_BYTES)
             if not chunk:
@@ -510,14 +571,42 @@ def _discard(workspace: TemporaryWorkspace) -> dict[str, object]:
     return workspace.discard()
 
 
-def _record_sidecars(workspace: TemporaryWorkspace, name: str) -> None:
-    """SQLite may create -wal/-shm beside a database this run just opened.
+def _inspect_sidecars(path: Path) -> dict[str, object]:
+    """Look at the SQLite sidecars beside one database; adopt none of them.
 
-    They belong to the copy this run made, so they are recorded here by exact
-    name.  Nothing is inferred from a suffix that happens to be on disk.
+    SQLite creates -wal/-shm beside a database it opens, and a cleanup would
+    like to remove them again.  A name is not a provenance: anything can put a
+    file with exactly that name there between the open and the cleanup, and a
+    suffix test would then delete a stranger while reporting success.
+
+    So this function only reports.  A sidecar is *retained* with the reason
+    that it cannot be proven to be this run's, and its identity is read
+    explicitly -- if even that fails, the failure is typed and travels into the
+    command's exit code instead of escaping from a finally block.
     """
+    retained: list[dict[str, object]] = []
+    errors: list[str] = []
     for suffix in ("-wal", "-shm"):
-        workspace.record(name + suffix, required=False)
+        candidate = Path(str(path) + suffix)
+        try:
+            info = os.lstat(candidate)
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            retained.append({"name": candidate.name, "reason": "identity_unavailable"})
+            errors.append(
+                "sidecar_identity_unavailable: %s (%s)"
+                % (candidate.name, type(error).__name__)
+            )
+            continue
+        retained.append(
+            {
+                "name": candidate.name,
+                "reason": "sidecar_not_proven",
+                "bytes": int(info.st_size),
+            }
+        )
+    return {"retained": retained, "errors": errors}
 
 
 def _safe_cleanup(workspace: TemporaryWorkspace) -> dict[str, object]:
@@ -750,11 +839,14 @@ def _online_snapshot(
     is mid-commit still yields one consistent state.  The source is never
     checkpointed, journalled or written.
     """
+    # The target is created by this run, exclusively, before SQLite touches it:
+    # SQLite writes by name, so the claim is what proves afterwards that the
+    # file it wrote is the file this run made.  The handle is dropped before
+    # SQLite takes the file over; the recorded identity is enough.
+    workspace.claim(target.name, purpose="online_snapshot")
     destination = sqlite3.connect(
         str(target), timeout=_READ_TIMEOUT_SECONDS, isolation_level=None
     )
-    # The file belongs to this run from the moment SQLite creates it.
-    workspace.record(target.name)
     try:
         with contextlib.closing(_connect_readonly(source, snapshot=False)) as origin:
             origin.backup(destination)
@@ -765,8 +857,11 @@ def _online_snapshot(
         destination.execute("PRAGMA journal_mode=DELETE")
     finally:
         destination.close()
-    for suffix in ("-wal", "-shm"):
-        workspace.record(target.name + suffix, required=False)
+    owned = workspace.verify_member(target.name)
+    if owned["state"] != "owned":
+        # Another object took the name while SQLite wrote: the bytes in the
+        # snapshot belong to a file this run did not create.
+        raise BackupError("snapshot_target_replaced", str(target))
     # The snapshot is complete now: record its final size and time so a later
     # cleanup can tell an unfinished copy from this finished one.
     workspace.record(target.name)
@@ -811,7 +906,7 @@ def _file_group_copy(
             if suffix == "-wal" and int(entry["bytes"]) == 0:
                 continue
             raise FileNotFoundError(str(source_path))
-        destination = workspace.claim(source.name + suffix)
+        destination = workspace.claim(source.name + suffix, purpose="backup_copy")
         try:
             fact = _copy_file(source_path, destination)
         except FileNotFoundError:
@@ -826,8 +921,11 @@ def _file_group_copy(
             # moved; no copy may vouch for that.
             raise
         files.append(fact)
-        # Recording again refreshes the identity after the write.
-        workspace.record(fact["name"])
+        # Recording again refreshes size and time of the same object.  If the
+        # name no longer describes it, the copy is not this run's and claiming
+        # it back would be exactly the laundering the audit found.
+        if not workspace.record(fact["name"]):
+            raise BackupError("backup_target_replaced", str(fact["name"]))
     return files
 
 
@@ -909,7 +1007,11 @@ def backup_library(
         after = _group(source)
         after_counts = _source_counts(source)
         copy_report = inspect_library(copy_path)
-        _record_sidecars(workspace, source.name)
+        sidecar_report = _inspect_sidecars(copy_path)
+        if sidecar_report["errors"]:
+            raise BackupError(
+                "backup_sidecar_unavailable", "; ".join(sidecar_report["errors"])
+            )
         # Compare the two sides with each other, not each side against the shared
         # declaration: two databases can deviate from it in different ways and
         # still look identical to a name-set comparison (WC-01).
@@ -1042,18 +1144,23 @@ def backup_library(
     except BaseException as error:
         # The primary failure is saved first; the cleanup result is attached to
         # it and can never replace it.  A real interrupt keeps its own type.
-        _record_sidecars(workspace, source.name)
+        # No sidecar is adopted here: a file this run cannot prove it created
+        # stays on disk and the cleanup result names it.
         cleanup = _safe_cleanup(workspace)
         summary = _describe_cleanup(cleanup)
         if not isinstance(error, Exception):
             raise
         if isinstance(error, LibraryMaintenanceError):
             error.detail = ("%s; %s" % (error.detail, summary)).strip("; ")
+            error.cleanup = cleanup
             raise error
         code = "backup_manifest_failed" if stage == "manifest" else "backup_failed"
-        raise BackupError(
-            code, "%s: %s; %s" % (type(error).__name__, error, summary)
-        ) from None
+        failure = BackupError(code, "%s: %s; %s" % (type(error).__name__, error, summary))
+        # The cleanup travels as its own field even when the failure was not one
+        # of ours: the reason the run stopped and what it left behind are two
+        # facts, and a caller may need to act on the second one.
+        failure.cleanup = cleanup
+        raise failure from None
 
 
 def _now_utc() -> str:
@@ -1523,20 +1630,25 @@ def _path_identity(path: Path) -> dict[str, object]:
         return {"present": None, "error": type(error).__name__}
 
 
-def _copy_and_hash(source: Path, destination: Path) -> dict[str, object]:
+def _copy_and_hash(source: Path, destination: object) -> dict[str, object]:
     """Copy one member byte for byte and hash exactly the bytes written.
 
-    The identity of the open file is read before and after the copy, and the
+    The identity of the open source is read before and after the copy, and the
     name is stat-ed once more afterwards.  A member rewritten while it is
     being read therefore reports identities that disagree instead of a digest
     assembled from two versions (PA-01).
+
+    The destination is written through a descriptor that is proven against the
+    claim before it is truncated.  Two facts are returned about it: whether the
+    descriptor described the claimed object when the writer was opened, and
+    whether the *name* still pointed at it afterwards -- a replaced name is
+    reported, never silently adopted.
     """
     digest = hashlib.sha256()
     total = 0
     with source.open("rb") as reader:
         before = _identity(os.fstat(reader.fileno()))
-        with destination.open("r+b") as writer:
-            writer.truncate(0)
+        with _owned_writer(destination) as writer:  # type: ignore[union-attr]
             while True:
                 chunk = reader.read(_CHUNK_BYTES)
                 if not chunk:
@@ -1548,12 +1660,14 @@ def _copy_and_hash(source: Path, destination: Path) -> dict[str, object]:
             os.fsync(writer.fileno())
         after = _identity(os.fstat(reader.fileno()))
     return {
-        "name": destination.name,
+        "name": getattr(destination, "name", str(destination)),
         "bytes": total,
         "sha256": digest.hexdigest(),
         "before": before,
         "after": after,
         "path_now": _path_identity(source),
+        "destination": getattr(destination, "verify", lambda: {"state": "unknown"})()
+        if hasattr(destination, "verify") else {"state": "unknown", "reason": "no_claim"},
     }
 
 
@@ -1636,7 +1750,7 @@ def _seal_members(
         # has a ~15.6 ms tick, which quantises a small copy into 0.0 and makes
         # the evidence unreadable.
         started = time.perf_counter()
-        destination = ws.claim(name)
+        destination = ws.claim(name, purpose="verify_copy")
         try:
             copied = _copy_and_hash(path, destination)
         except FileNotFoundError:
@@ -1654,10 +1768,20 @@ def _seal_members(
             raise LibraryMaintenanceError(
                 "library_unavailable", "%s: %s" % (name, error)
             ) from None
+        except WorkspaceError as error:
+            # The object we claimed could not be proven ours, so not one byte
+            # was written.  That is a typed failure, not a coverage verdict.
+            raise LibraryMaintenanceError(
+                "library_unavailable", "%s: %s" % (name, error)
+            ) from None
         copy_seconds += time.perf_counter() - started
         copy_bytes += int(copied["bytes"])
-        # The copy just created this name; recording it is what makes it ours.
-        ws.record(name)
+        # Refreshing the record is legitimate only while the name still
+        # describes the object this run created; record() refuses otherwise.
+        replaced = str((copied.get("destination") or {}).get("state")) != "owned"
+        if not ws.record(name):
+            replaced = True
+        fact["destination"] = copied.get("destination")
         after[name] = copied["path_now"]
         started = time.perf_counter()
         readback = _readback_digest(workspace / name)
@@ -1668,6 +1792,7 @@ def _seal_members(
             copied["before"] != copied["after"]
             or copied["path_now"] != copied["before"]
             or readback != copied["sha256"]
+            or replaced
         ):
             fact["state"] = "changed"
         elif name not in sealed:
@@ -1741,8 +1866,13 @@ def _verify_exit_code(ok: bool, reasons: list[str]) -> int:
     A staging area that cannot be created is not a finding about the backup:
     nothing was compared, so the command reports an unreadable condition (3)
     instead of dressing it up as a content mismatch (2).
+
+    The same holds for a staging area whose own contents cannot be described:
+    if a sidecar's identity cannot be read, this run cannot say what it left
+    behind, so it does not get to answer "the backup is fine" either.
     """
-    if "verify_workspace_unavailable" in set(reasons):
+    blocking = {"verify_workspace_unavailable", "workspace_sidecar_unavailable"}
+    if blocking & set(reasons):
         return 3
     return 0 if ok else 2
 
@@ -1897,7 +2027,14 @@ def verify_backup(
                     logical_error = str(getattr(error, "code", "library_unreadable"))
                     warnings.append("copy_logical_unreadable")
                 evidence["read_seconds"] = round(time.perf_counter() - read_started, 6)
-                _record_sidecars(ws, library_name)
+                # SQLite may have left -wal/-shm beside the copy.  They are
+                # reported, never adopted: this run cannot prove it created
+                # them, so it may not delete them either.
+                sidecars = _inspect_sidecars(isolated)
+                evidence["sidecars"] = sidecars
+                if sidecars["errors"]:
+                    reasons.append("workspace_sidecar_unavailable")
+                    warnings.append("workspace_sidecar_unavailable")
             else:
                 warnings.append("copy_missing")
             # The last look comes after every read, so a member rewritten at any
@@ -1927,8 +2064,8 @@ def verify_backup(
         if ws is not None:
             # The cleanup is a fact about this run's own directory, not about
             # the backup: it is reported next to the verdict and never turns a
-            # sound backup into a broken one.
-            _record_sidecars(ws, library_name)
+            # sound backup into a broken one.  Nothing is recorded here: a
+            # finally block must not adopt a name and must not raise.
             cleanup = _safe_cleanup(ws)
             evidence["cleanup"] = cleanup
             if cleanup.get("state") != "ok":
@@ -3076,13 +3213,20 @@ def main(argv: list[str] | None = None) -> int:
         return _EXIT_REFUSED
     except LibraryMaintenanceError as error:
         if as_json:
-            print(
-                json.dumps(
-                    {"status": "error", "code": error.code, "detail": error.detail},
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            )
+            payload: dict[str, object] = {
+                "status": "error",
+                "code": error.code,
+                "detail": error.detail,
+            }
+            cleanup = getattr(error, "cleanup", None)
+            if cleanup is not None:
+                # A separate field, not more prose: what failed and what was
+                # left behind are two facts a caller acts on differently.
+                payload["cleanup"] = cleanup
+                payload["retained"] = [
+                    item.get("name") for item in (cleanup.get("kept") or [])
+                ]
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
             print(
                 "失败: %s%s" % (error.code, (" " + error.detail) if error.detail else ""),
