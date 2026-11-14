@@ -492,48 +492,22 @@ def _comparable(group: dict[str, dict[str, object]]) -> dict[str, object]:
 
 
 def _owned_writer(destination: object) -> "object":
-    """Open the claimed destination and prove it *before* truncating a byte.
+    """A writer for the claimed destination, proven before a byte is truncated.
 
-    The proof is fstat on the descriptor that is about to be written through,
-    compared with the identity recorded at exclusive creation.  A name that was
-    replaced in the meantime makes the descriptor describe a stranger, so the
-    comparison fails and nothing in the stranger's file is touched.  A name
-    swapped after this point cannot affect the write: the bytes go through the
-    descriptor that was just verified.
+    The copy functions take "a destination that may or may not carry a claim",
+    so this is where that shape is checked; the proof itself is
+    ClaimedFile.writer(), and there is exactly one of it.
     """
     claim = getattr(destination, "claim", None)
-    if not isinstance(claim, OwnershipClaim):
+    writer = getattr(destination, "writer", None)
+    if not isinstance(claim, OwnershipClaim) or not callable(writer):
         # No claim means no proof.  Refusing is the only honest answer: writing
         # would be writing into a file this run cannot show it created.
         raise WorkspaceError("copy_requires_claim: %r" % (destination,))
-    target: Path = claim.path
-    flags = os.O_RDWR | getattr(os, "O_BINARY", 0)
-    try:
-        handle = os.open(target, flags)
-    except FileNotFoundError:
-        raise WorkspaceError("claim_name_missing: %s" % target) from None
-    except OSError as error:
-        raise WorkspaceError(
-            "claim_unwritable: %s (%s)" % (target, type(error).__name__)
-        ) from None
-    state = verify_owned(claim, handle=handle)
-    if state["state"] != OWNED:
-        os.close(handle)
-        raise WorkspaceError(
-            "claim_not_owned: %s (%s)"
-            % (target, state.get("reason") or state["state"])
-        )
-    try:
-        stream = os.fdopen(handle, "r+b", buffering=0)
-        stream.seek(0)
-        stream.truncate(0)
-    except OSError:
-        try:
-            os.close(handle)
-        except OSError:
-            pass
-        raise
-    return stream
+    # The proof itself lives in exactly one place (ClaimedFile.writer).  Two
+    # copies of "open, fstat the descriptor, compare, then truncate" would
+    # drift the day one of them is fixed and the other is not.
+    return writer()
 
 
 def _copy_file(source: Path, destination: object) -> dict[str, object]:

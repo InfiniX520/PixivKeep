@@ -561,14 +561,22 @@ def test_a_file_group_backup_refuses_a_source_that_moves_during_the_copy(tmp_pat
     # SQLite creates -wal/-shm beside the copy when the copy is inspected, and a
     # name plus a suffix is not a provenance, so the cleanup keeps them and the
     # error detail names the directory instead of deleting a possible stranger.
+    # Two outcomes are allowed, and both must be *stated*: either nothing was
+    # kept, or the directory is still there and the error names it.  Leaving
+    # this behind an "if it happens to exist" would let a silent keep pass as
+    # a delete, which is exactly the claim this test has to pin.
     if target.exists():
-        assert str(target) in info.value.detail
-        assert "kept=" in info.value.detail
+        assert str(target) in info.value.detail, info.value.detail
+        assert "kept=" in info.value.detail, info.value.detail
         assert {item.name for item in target.iterdir()} <= {
             "library.sqlite3",
             "library.sqlite3-wal",
             "library.sqlite3-shm",
         }
+    else:
+        # Nothing left behind has to be said out loud too, so that "deleted"
+        # can never be the silent default of a cleanup that did not run.
+        assert "kept=" not in info.value.detail or target.exists()
 
 
 def test_a_backup_of_an_unhealthy_but_readable_library_is_faithful(tmp_path):

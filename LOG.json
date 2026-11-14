@@ -2309,7 +2309,7 @@
     {
       "id": "JPGPNG-U1U2-AUDIT-FIX-20261115-01",
       "session_date": "2026-11-15",
-      "status": "audit_findings_fixed_pending_reaudit",
+      "status": "audit_findings_fixed_reaudited_no_code_p1",
       "summary": "Fixed the 1 P1 + 7 P2 from the 031627c independent audit: ownership now spans create/write/SQLite/cleanup with claim identity checked before any write and sidecars retained when unprovable; the quality engine has one command-wide budget, a content version with path stability, four transport states and palette-bounds checking; coverage separates works from pages and only calls delivery complete when page evidence exists; the dependency report is schema 2 with input completeness in the exit code and every applicable constraint aggregated.",
       "audited_commit": "031627c64eb2aac5605b05a21a47a7c0b3c5fef2",
       "product_baseline": "4ba891e",
@@ -2333,6 +2333,15 @@
           "collection": 4,
           "source": 5,
           "note": "one setup-only Tcl error was retried and recorded"
+        },
+        "independent_reaudit": {
+          "range": "031627c..e54eeb9",
+          "files": 38,
+          "insertions": 4047,
+          "deletions": 402,
+          "verdict": "no P1 in code; one P2 (this file claimed a passed audit it had not had) and two P3",
+          "baseline_untouched": true,
+          "rerun": "127 tests, 0 failed"
         }
       },
       "new_findings": [],
