@@ -280,3 +280,29 @@ def test_the_module_reads_nothing():
     source = inspect.getsource(filter_explain)
     for forbidden in ("open(", "requests", "sqlite3", "urllib", "socket", "subprocess"):
         assert forbidden not in source
+
+
+def test_reasons_come_only_from_the_shared_vocabulary():
+    """One constructor, one table: this module must not build a record itself."""
+    from core import filter_explain, filter_reasons
+
+    assert filter_explain.REASON_CODES is filter_reasons.REASON_CODES
+    assert filter_explain.FIELDS is filter_reasons.FIELDS
+    assert filter_explain.LEGACY_CODE_MAP is filter_reasons.LEGACY_CODE_MAP
+    assert not hasattr(filter_explain, "_reason")
+    assert not hasattr(filter_explain, "_verdict")
+
+    tree = ast.parse(inspect.getsource(filter_explain))
+    literals = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            literals.extend(
+                key.value
+                for key in node.keys
+                if isinstance(key, ast.Constant) and isinstance(key.value, str)
+            )
+    assert "code" not in literals, literals
+
+    result = explain(candidate(bookmarks=1), {"min_bookmarks": 10})
+    for item in result["reasons"]:
+        assert isinstance(item, filter_reasons.FrozenReason)

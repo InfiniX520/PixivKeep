@@ -37,36 +37,22 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from core.candidate_filter import ArtworkMetadata, evaluate_filters
+from core.filter_reasons import (
+    FIELDS,
+    LEGACY_CODE_MAP,
+    REASON_CODES,
+    FilterReasonError,
+    reason,
+    verdict_of,
+)
 from core.task_contracts import FilterSpec
 
 #: The three answers this module can give.
 VERDICTS = ("match", "exclude", "unknown")
 
-#: The closed set of reason codes (B1 owns the shared table; this module keeps
-#: its own copy so the two lanes can be developed without importing each other).
-REASON_CODES = (
-    "favorites_below",
-    "ai_excluded",
-    "type_unsupported",
-    "field_unknown",
-    "access_denied",
-)
-
-#: The closed set of fields a reason may point at.
-FIELDS = ("bookmarks", "ai_flag", "type", "availability", "original_urls")
-
-#: Legacy code -> (new code, field, unknown).  A code that is not here is a bug
-#: in the caller, not something to pass through as a free string.
-LEGACY_CODE_MAP = {
-    "bookmarks_below_minimum": ("favorites_below", "bookmarks", False),
-    "bookmarks_unknown": ("field_unknown", "bookmarks", True),
-    "ai_excluded": ("ai_excluded", "ai_flag", False),
-    "ai_flag_unknown": ("field_unknown", "ai_flag", True),
-    "ugoira_unsupported": ("type_unsupported", "type", False),
-    "artwork_unavailable": ("access_denied", "availability", False),
-    "original_metadata_unknown": ("field_unknown", "original_urls", True),
-    "invalid_original_metadata": ("field_unknown", "original_urls", True),
-}
+# REASON_CODES, FIELDS and LEGACY_CODE_MAP are imported from core.filter_reasons:
+# one vocabulary, one table, one constructor.  This module only translates the
+# filtering answer and decides the verdict; it never builds a record itself.
 
 #: FilterEvaluation state -> the verdict its own reasons must produce.  This is
 #: checked on every call (see :func:`explain`), so the table cannot drift away
@@ -74,20 +60,8 @@ LEGACY_CODE_MAP = {
 STATE_MAP = {"allow": "match", "filtered": "exclude", "metadata_unknown": "unknown"}
 
 _KNOWN_KINDS = ("illust", "manga", "ugoira")
-_SCALARS = (str, int, bool, type(None))
 
 
-def _reason(code: object, field: object, evidence: object, *, unknown: bool = False) -> dict:
-    """One reason record, validated against the closed sets."""
-    if code not in REASON_CODES:
-        raise ValueError("invalid_reason_code: %r" % (code,))
-    if field not in FIELDS:
-        raise ValueError("invalid_reason_field: %r" % (field,))
-    if type(unknown) is not bool:
-        raise ValueError("invalid_reason_unknown")
-    if not isinstance(evidence, _SCALARS):
-        raise ValueError("invalid_reason_evidence: %r" % (evidence,))
-    return {"code": str(code), "field": str(field), "evidence": evidence, "unknown": unknown}
 
 
 def _conditions(value: object) -> FilterSpec:
@@ -129,13 +103,6 @@ def _availability(candidate: object) -> object:
     raise ValueError("invalid_candidate: availability must be bool or None")
 
 
-def _verdict(reasons: list[dict]) -> str:
-    """One verdict from reason records; a known reason always wins."""
-    if any(item["unknown"] is False for item in reasons):
-        return "exclude"
-    if any(item["unknown"] is True for item in reasons):
-        return "unknown"
-    return "match"
 
 
 def explain(candidate: object, conditions: object) -> dict:
@@ -164,17 +131,17 @@ def explain(candidate: object, conditions: object) -> dict:
         if mapped is None:
             # evaluate_filters grew a code this module does not know: that is a
             # contract break, not something to show to a user as a free string.
-            raise ValueError("unmapped_reason_code: %r" % (legacy,))
+            raise FilterReasonError("unmapped_reason_code", legacy)
         code, field, unknown = mapped
         evidence = bookmarks if code == "favorites_below" else (
             True if code == "ai_excluded" else None
         )
-        filter_reasons.append(_reason(code, field, evidence, unknown=unknown))
+        filter_reasons.append(reason(code, field, evidence, unknown=unknown))
 
     expected = STATE_MAP.get(evaluation.state)
     if expected is None:
         raise ValueError("unknown_filter_state: %r" % (evaluation.state,))
-    produced = _verdict(filter_reasons)
+    produced = verdict_of(filter_reasons)
     if produced != expected:
         # The mapping is not decoration: a disagreement means the codes derived
         # above no longer describe the state evaluate_filters reported, and a
@@ -187,11 +154,11 @@ def explain(candidate: object, conditions: object) -> dict:
 
     kind = _kind(candidate)
     if kind == "ugoira":
-        reasons.append(_reason("type_unsupported", "type", "ugoira"))
+        reasons.append(reason("type_unsupported", "type", "ugoira"))
     elif kind == "unknown":
-        reasons.append(_reason("field_unknown", "type", None, unknown=True))
+        reasons.append(reason("field_unknown", "type", None, unknown=True))
 
     if availability is False:
-        reasons.append(_reason("access_denied", "availability", False))
+        reasons.append(reason("access_denied", "availability", False))
 
-    return {"verdict": _verdict(reasons), "reasons": reasons}
+    return {"verdict": verdict_of(reasons), "reasons": reasons}
