@@ -2821,7 +2821,10 @@ def _decode_lines(reports: list[dict[str, object]], code: int) -> list[str]:
         for name, label in (("structure", "结构"), ("decode", "解码"), ("pages", "页")):
             entry = quality.get(name) or {}
             reason = entry.get("reason")
-            lines.append("  %s: %s%s" % (label, entry.get("state"), ("（%s）" % reason) if reason else ""))
+            lines.append(
+                "  %s: %s%s"
+                % (label, entry.get("state"), ("（%s）" % reason) if reason else "")
+            )
         stability = str(item.get("path_stability") or "unknown")
         stability_reason = item.get("path_stability_reason")
         lines.append(
