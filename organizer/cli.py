@@ -16,6 +16,7 @@ from organizer.web import BrowserConsole, WebClient
 from organizer.snapshots import snapshot
 from organizer.samples import sample, review, supplement
 from organizer.plans import make_plan, apply_plan, reconcile, undo_plan, steps
+from organizer.offline_cli import OFFLINE_COMMANDS, register as register_offline, run as run_offline
 
 
 def parser():
@@ -56,6 +57,7 @@ def parser():
     export=commands.add_parser('export',help='导出本地资料；已有目标不覆盖')
     export.add_argument('kind',choices=('snapshot','sample','review','plan','job'))
     export.add_argument('id');export.add_argument('--output',type=Path,required=True)
+    register_offline(commands)
     return result
 
 
@@ -149,6 +151,10 @@ def run(args):
 
 def main(argv=None):
     args=parser().parse_args(argv)
+    if args.command in OFFLINE_COMMANDS:
+        # The offline commands never touch the network or the store, and they
+        # own their exit codes (0 / 3 / 5) instead of the store error mapping.
+        return run_offline(args)
     try:
         emit(run(args));return 0
     except OrganizerError as exc:
