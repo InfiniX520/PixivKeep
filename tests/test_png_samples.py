@@ -15,20 +15,27 @@ PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 RGBA_BYTES_PER_PIXEL = 4
 
 
-def parse_chunks(data: bytes) -> list[tuple[bytes, bytes]]:
-    """Walk the chunk stream and verify every CRC independently."""
+def chunk_records(data: bytes) -> list[tuple[bytes, bytes, int, int]]:
+    """Walk the chunk stream; return kind, payload, stored CRC, computed CRC."""
     assert data[:8] == PNG_SIGNATURE
     offset = 8
-    chunks: list[tuple[bytes, bytes]] = []
+    records: list[tuple[bytes, bytes, int, int]] = []
     while offset < len(data):
         (length,) = struct.unpack(">I", data[offset : offset + 4])
         kind = data[offset + 4 : offset + 8]
         payload = data[offset + 8 : offset + 8 + length]
-        (crc,) = struct.unpack(">I", data[offset + 8 + length : offset + 12 + length])
-        assert crc == (zlib.crc32(kind + payload) & 0xFFFFFFFF), "bad CRC on " + repr(kind)
-        chunks.append((kind, payload))
+        (stored,) = struct.unpack(">I", data[offset + 8 + length : offset + 12 + length])
+        records.append((kind, payload, stored, zlib.crc32(kind + payload) & 0xFFFFFFFF))
         offset += 12 + length
-    return chunks
+    return records
+
+
+def parse_chunks(data: bytes) -> list[tuple[bytes, bytes]]:
+    """Walk the chunk stream and verify every CRC independently."""
+    records = chunk_records(data)
+    for kind, _payload, stored, computed in records:
+        assert stored == computed, "bad CRC on " + repr(kind)
+    return [(kind, payload) for kind, payload, _stored, _computed in records]
 
 
 def header_of(chunks: list[tuple[bytes, bytes]]) -> tuple[int, int, int, int, int]:
@@ -54,6 +61,18 @@ def adam7_rows(width: int, height: int) -> list[tuple[int, int]]:
         if columns and rows:
             plan.append((columns, rows))
     return plan
+
+
+def _tmp_path(suffix: str = ".bin"):
+    """A file under pytest tmp_path, created empty so the test owns it."""
+    import tempfile
+    from pathlib import Path
+
+    handle, name = tempfile.mkstemp(suffix=suffix)
+    import os
+
+    os.close(handle)
+    return Path(name)
 
 
 def row_bytes(columns: int) -> int:
@@ -137,8 +156,11 @@ def test_samples_are_deterministic_and_small() -> None:
         "interlaced": samples.build_interlaced,
         "bad_filter": samples.build_bad_filter,
         "truncated": samples.build_truncated,
+        "bad_crc": samples.build_bad_crc,
+        "missing_iend": samples.build_missing_iend,
         "oversized": samples.build_oversized_header,
         "gif": samples.build_gif_header,
+        "minimal_gif": samples.build_minimal_gif,
         "jpeg": samples.build_jpeg_header,
         "webp": samples.build_webp_header,
     }
@@ -154,3 +176,72 @@ def test_valid_sample_dimensions_are_parameterised() -> None:
     assert (width, height) == (7, 3)
     raw = zlib.decompress(idat_of(chunks))
     assert len(raw) == 3 * row_bytes(7)
+
+
+def test_bad_crc_sample_decompresses_but_fails_its_crc() -> None:
+    records = chunk_records(samples.build_bad_crc())
+    kinds = [kind for kind, _payload, _stored, _computed in records]
+    assert kinds[0] == b"IHDR" and kinds[-1] == b"IEND" and b"IDAT" in kinds
+    mismatched = [
+        kind
+        for kind, _payload, stored, computed in records
+        if stored != computed
+    ]
+    assert mismatched == [b"IDAT"], "exactly the IDAT CRC has to be wrong"
+    idat = b"".join(
+        payload for kind, payload, _stored, _computed in records if kind == b"IDAT"
+    )
+    assert len(zlib.decompress(idat)) == 68, "the pixel data itself stays intact"
+
+
+def test_missing_iend_sample_has_no_end_marker() -> None:
+    records = chunk_records(samples.build_missing_iend())
+    kinds = [kind for kind, _payload, _stored, _computed in records]
+    assert b"IEND" not in kinds
+    assert kinds[-1] == b"IDAT", "the stream stops right after IDAT"
+    for kind, _payload, stored, computed in records:
+        assert stored == computed, "every remaining chunk keeps a valid CRC: " + repr(kind)
+    idat = b"".join(
+        payload for kind, payload, _stored, _computed in records if kind == b"IDAT"
+    )
+    assert len(zlib.decompress(idat)) == 68
+
+
+def test_minimal_gif_is_structurally_valid_for_the_existing_parser() -> None:
+    """The only non-PNG sample that passes the structure parser (no decoder needed)."""
+    from core.image_validation import inspect_image
+
+    data = samples.build_minimal_gif()
+    assert data.startswith(b"GIF89a") and data.endswith(b";")
+    tmp = _tmp_path()
+    try:
+        tmp.write_bytes(data)
+        evidence = inspect_image(tmp)
+        assert evidence.media_type == "image/gif"
+        assert (evidence.width, evidence.height, evidence.frames) == (1, 1, 1)
+        assert evidence.verification == "structure_checked"
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def test_header_only_samples_are_rejected_by_the_structure_parser() -> None:
+    """They recognise the signature and fail, which is exactly what they are for."""
+    from core.image_validation import ImageValidationError, inspect_image
+
+    cases = {
+        "gif": (samples.build_gif_header(), "gif_missing_image_data"),
+        "jpeg": (samples.build_jpeg_header(), "jpeg_missing_image_data"),
+        "webp": (samples.build_webp_header(), "webp_invalid_vp8_header"),
+    }
+    for name, (data, expected) in cases.items():
+        tmp = _tmp_path(suffix="." + name)
+        try:
+            tmp.write_bytes(data)
+            try:
+                inspect_image(tmp)
+            except ImageValidationError as error:
+                assert error.code == expected, name + " rejected as " + str(error.code)
+            else:
+                raise AssertionError(name + " must not pass structure validation")
+        finally:
+            tmp.unlink(missing_ok=True)

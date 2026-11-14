@@ -138,8 +138,68 @@ def build_oversized_header(width: int = 100000, height: int = 100000) -> bytes:
     return build_png(width, height, idat_payload=zlib.compress(b"\x00" + pixel(0, 0), 9))
 
 
+
+
+def _flip_crc_of(data: bytes, kind: bytes) -> bytes:
+    """Return the same PNG with one chunk CRC deliberately wrong."""
+    out = bytearray(data)
+    offset = 8
+    while offset < len(out):
+        (length,) = struct.unpack(">I", out[offset : offset + 4])
+        current = bytes(out[offset + 4 : offset + 8])
+        if current == kind:
+            crc_at = offset + 8 + length
+            (value,) = struct.unpack(">I", out[crc_at : crc_at + 4])
+            out[crc_at : crc_at + 4] = struct.pack(">I", value ^ 0xFFFFFFFF)
+            return bytes(out)
+        offset += 12 + length
+    raise ValueError("chunk not found")
+
+
+def build_bad_crc() -> bytes:
+    """A structurally complete PNG whose IDAT chunk carries a wrong CRC.
+
+    The pixel stream is intact: inflating the IDAT payload still yields all 68
+    bytes, so only the CRC check can reject this file.  That is the point of
+    the sample: it separates "the bytes decompress" from "the file is intact".
+    """
+    return _flip_crc_of(build_valid_rgba(), b"IDAT")
+
+
+def build_missing_iend() -> bytes:
+    """A PNG with intact IHDR/IDAT and correct CRCs, but no IEND at the end.
+
+    A reader that stops after the last chunk it can parse would accept this;
+    a reader that requires the end marker must refuse it.
+    """
+    return build_valid_rgba()[:-12]  # the IEND chunk is exactly twelve bytes
+
+def build_minimal_gif() -> bytes:
+    """A structure-valid 1x1 GIF89a: header, palette, one image, trailer.
+
+    This is the only sample here that the existing structure parser accepts
+    for a non-PNG format (image/gif, 1x1, one frame), so a matrix can use it
+    to reach the decode branch and confirm capability_unavailable honestly:
+    the file is fine, the decoder simply does not exist on this host.
+    """
+    return bytes((
+        0x47, 0x49, 0x46, 0x38, 0x39, 0x61,  # GIF89a
+        0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00,  # 1x1, global colour table
+        0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF,  # black and white
+        0x21, 0xF9, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00,  # graphic control
+        0x2C, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,  # image
+        0x02, 0x02, 0x44, 0x01, 0x00,  # LZW data
+        0x3B,  # trailer
+    ))
+
 def build_gif_header() -> bytes:
-    """A minimal but structurally recognisable GIF89a file (8x8, no frames)."""
+    """Format-detection sample only: a GIF89a header with no image data.
+
+    The existing structure parser recognises the signature but rejects the
+    file with gif_missing_image_data, so this sample never reaches a decoder.
+    Use build_minimal_gif() when a structure-valid GIF is needed; this one is
+    only for "the format was recognised and nothing else".
+    """
     return (
         b"GIF89a"
         + struct.pack("<HH", 8, 8)
@@ -149,14 +209,27 @@ def build_gif_header() -> bytes:
 
 
 def build_jpeg_header() -> bytes:
-    """A minimal JPEG: SOI, a JFIF APP0 segment, then EOI."""
+    """Format-detection sample only: SOI, a JFIF APP0 segment, then EOI.
+
+    The structure parser rejects it with jpeg_missing_image_data: the signature
+    is recognised, the file is not an image.  There is no JPEG decoder on this
+    host, and no structure-valid JPEG sample exists here, so the no-decoder
+    branch for JPEG has to be exercised at the registry level, not with this
+    file.
+    """
     app0 = b"JFIF\x00" + bytes((1, 1, 0)) + struct.pack(">HH", 1, 1) + bytes((0, 0))
     segment = b"\xff\xe0" + struct.pack(">H", len(app0) + 2) + app0
     return b"\xff\xd8" + segment + b"\xff\xd9"
 
 
 def build_webp_header() -> bytes:
-    """A minimal RIFF/WEBP container with one VP8 chunk."""
+    """Format-detection sample only: a RIFF/WEBP container with one VP8 chunk.
+
+    The structure parser rejects it with webp_invalid_vp8_header: the container
+    is recognised, the payload is filler.  There is no WebP decoder on this
+    host and no structure-valid WebP sample here, so the no-decoder branch for
+    WebP has to be exercised at the registry level.
+    """
     payload = bytes(range(8))
     chunk_bytes = b"VP8 " + struct.pack("<I", len(payload)) + payload
     riff_size = 4 + len(chunk_bytes)
