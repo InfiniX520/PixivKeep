@@ -12,6 +12,7 @@ import threading
 import time
 import webbrowser
 from concurrent.futures import Future
+from pathlib import Path
 
 from core.api_transport import BoundedMetadataSession, metadata_error
 from core.app_paths import AppPaths
@@ -25,6 +26,7 @@ from core.output_locations import OutputLocations, read_artist_ids
 from core.page_delivery import PageDeliveryExecutor
 from core.pixiv_follow_source import PixivFollowSource
 from core.pixiv_query_source import PixivQuerySource
+from core.report_commands import coverage_lines, coverage_report
 from core.request_pacing import RequestPacer
 from core.task_contracts import PathRef
 from pixivpy3 import AppPixivAPI
@@ -114,6 +116,39 @@ class DesktopRuntime(CollectionRuntime):
         return self._query_command(self._queries, self._verification_summary,
             batch_id=batch_id)
 
+    def attach_paths(self, paths) -> None:
+        """Where the read-only reports look for their stores.
+
+        The runtime is built before the session can pass AppPaths through the
+        existing constructor, and a report must not guess a path from the
+        current directory, so the session hands it over explicitly.
+        """
+        self._app_paths = paths
+
+    def coverage_summary(self, *, run_id, state_path=None):
+        """One crawl run's coverage summary, read on the query owner.
+
+        Read-only by construction: the report goes through
+        core.crawl_state_reader (SQLite mode=ro + query_only), never through the
+        crawl state writer, which would create the directory, switch the journal
+        mode and run DDL on the way in.
+        """
+        return self._query_command(self._queries, self._coverage_summary,
+            run_id=run_id, state_path=state_path)
+
+    def _coverage_summary(self, *, run_id, state_path=None):
+        database = Path(state_path) if state_path else self._crawl_state_path()
+        report = coverage_report(database, str(run_id))
+        return {"run_id": str(run_id), "database": str(database),
+                "report": report, "lines": coverage_lines(report),
+                "exit_code": report["exit_code"]}
+
+    def _crawl_state_path(self) -> Path:
+        paths = getattr(self, "_app_paths", None)
+        if paths is None:
+            raise RuntimeError("crawl state path is not attached")
+        return paths.download_logs_dir / "follow_crawl_state.sqlite3"
+
     def _verification_pages(self, *, batch_id=None, states=None, after=None, limit=50):
         return self.repository.list_verification_pages(batch_id=batch_id,
             states=states, after=after, limit=limit)
@@ -202,6 +237,7 @@ class DesktopSession:
                         headers_factory=lambda url: build_common_headers(user_agent=self.settings.user_agent)))
                 self.runtime = DesktopRuntime(TaskCoordinator(repository, delivery, workers=self.settings.workers),
                     self.source_factory or DesktopSourceFactory(self.paths, self.api_factory,self._api_pacer), diagnostic=self.log)
+                self.runtime.attach_paths(self.paths)
                 self.runtime.start().result(20)
             except BaseException:
                 if self.runtime is None:

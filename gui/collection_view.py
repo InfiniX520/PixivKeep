@@ -20,16 +20,18 @@ from typing import Any, Callable
 
 from core.log_view import ViewDelta
 from gui.collection_theme import apply_collection_styles, scale_px
+from gui.coverage_panel import CoveragePanel
 from gui.verification_panel import VerificationPanel
 from core.source_settings import filter_description
 
-PAGE_KEYS = ("follow", "tasks", "sources", "records", "verify", "settings")
+PAGE_KEYS = ("follow", "tasks", "sources", "records", "verify", "coverage", "settings")
 PAGE_LABELS = {
     "follow": "关注下载",
     "tasks": "下载任务",
     "sources": "其他来源",
     "records": "下载记录",
     "verify": "核验",
+    "coverage": "覆盖",
     "settings": "设置",
 }
 TABLE_ROW_LIMIT = 200
@@ -363,6 +365,7 @@ class CollectionView(ttk.Frame):
         self._build_sources_page(self._pages["sources"])
         self._build_records_page(self._pages["records"])
         self._build_verify_page(self._pages["verify"])
+        self._build_coverage_page(self._pages["coverage"])
         self._build_settings_page(self._pages["settings"])
 
     # -- shared widgets -------------------------------------------------
@@ -802,6 +805,53 @@ class CollectionView(ttk.Frame):
             "已经记录、但当前磁盘找不到一致字节的图片页，在这里逐页核验。核验只读磁盘，不会删除或覆盖文件。")
         self._verification_panel = VerificationPanel(body, on_action=self._emit)
         self._verification_panel.grid(row=1, column=0, sticky="nsew")
+
+    # -- coverage page --------------------------------------------------
+
+    def _build_coverage_page(self, page):
+        """Mount the read-only coverage panel on its own page.
+
+        The panel owns the run id, the read button and the body; this page only
+        supplies the geometry.  Nothing here reads a store: the controller does
+        that on the query owner and hands back finished lines.
+        """
+        s = lambda value: scale_px(self, value)  # noqa: E731
+        page.columnconfigure(0, weight=1)
+        page.rowconfigure(0, weight=1)
+        body = ttk.Frame(page, style="CollectionPage.TFrame")
+        body.grid(row=0, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(1, weight=1)
+        body.configure(padding=(s(30), 0, s(30), s(24)))
+        self._page_heading(body, "覆盖摘要",
+            "一次关注运行到底查了什么、保存了什么、哪些还证明不了。这里只读，不改断点也不改库。")
+        self._coverage_panel = CoveragePanel(body, on_action=self._emit)
+        self._coverage_panel.grid(row=1, column=0, sticky="nsew")
+
+    def set_coverage_loading(self) -> None:
+        if self._disposed:
+            return
+        panel = getattr(self, "_coverage_panel", None)
+        if panel is not None:
+            panel.set_loading()
+
+    def set_coverage_error(self, reason: Any) -> None:
+        if self._disposed:
+            return
+        panel = getattr(self, "_coverage_panel", None)
+        if panel is not None:
+            panel.set_error(reason)
+
+    def set_coverage_result(self, lines, *, run_id: object = "") -> None:
+        if self._disposed:
+            return
+        panel = getattr(self, "_coverage_panel", None)
+        if panel is not None:
+            panel.set_result(lines, run_id=run_id)
+
+    def coverage_state(self) -> str:
+        panel = getattr(self, "_coverage_panel", None)
+        return "missing" if panel is None else panel.state
 
     # -- settings page --------------------------------------------------
 
@@ -1683,9 +1733,13 @@ class CollectionView(ttk.Frame):
             return
         self._disposed = True
         self._on_action = None
-        panel = getattr(self, "_verification_panel", None)
-        if panel is not None:
-            panel.dispose()
+        # Every mounted panel is disposed here, on the owner thread: a widget that
+        # outlives root.destroy() is finalized inside whatever thread runs GC next,
+        # and Tcl refuses to delete its async handler from a foreign thread.
+        for name in ("_verification_panel", "_coverage_panel"):
+            panel = getattr(self, name, None)
+            if panel is not None:
+                panel.dispose()
         self._unbind_all()
         self._clear_widget_commands()
         self._release_variables()
