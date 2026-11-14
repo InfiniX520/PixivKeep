@@ -92,7 +92,10 @@ def test_a_matching_file_is_reported_and_exits_zero(tmp_path, capsys):
     # prefix is complete.
     assert report["coverage"] == "complete"
     assert report["scope"] == "full_walk"
-    assert report["resume"]["complete_prefix"] is True
+    # AMD2 section 4: a successful walk is "this run reached the end", never a
+    # certificate that the prefix may be trusted later, so complete_prefix is False.
+    assert report["resume"]["complete_prefix"] is False
+    assert report["resume"]["state"] == "not_needed"
 
 
 def test_a_missing_file_is_a_finding_and_exits_two(tmp_path, capsys):

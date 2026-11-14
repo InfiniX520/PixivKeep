@@ -122,7 +122,7 @@ ws.discard() -> {"state": ok|partial|kept|failed, "removed": [...], "kept": [{"n
 {"bytes": int, "sha256": str|null,
  "handle_identity": "ok"|"unknown"|"changed",
  "path_binding": "ok"|"unknown"|"changed",
- "content": "ok"|"unknown",
+ "content": "ok"|"unknown"|"changed",
  "identity": "ok"|"unknown"|"changed",   # 组合结果
  "identity_reason": str|null,
  "volume"/"file_id"/"hardlink_count": int|null}
@@ -135,6 +135,7 @@ ws.discard() -> {"state": ok|partial|kept|failed, "removed": [...], "kept": [{"n
 3. 句柄与路径都有效但不一致 → `path_binding="changed"`，`identity="changed"`。
 4. 三者都有效且一致 → `identity="ok"`。
 5. 大小/mtime 在哈希期间变化 → `content="changed"` → `identity="changed"`（原 `size_changed_during_hash` 语义保留为 reason）。
+- `content` 的三个取值就是 `ok/unknown/changed`（本文件初稿只写了前两个；S4 实现按规则 5 需要第三个，属本修订内的口径补全）。
 
 `None` 不得同时表示"匹配"与"无证据"：未知一律显式字符串 + reason。`compare_files` 的双侧缺摘要规则保持（`sha256_missing` 计 `unproven`）。
 
