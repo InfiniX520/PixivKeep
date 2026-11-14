@@ -6,29 +6,20 @@ measure is None rather than 0.  This module treats the two very differently:
 * None means the sentence that would need that number is not printed at all -
   never "0 页", because "we did not measure it" and "it is empty" are different
   facts and only one of them is allowed to become a digit;
-* the words 已查完 / 已穷尽 / 全部完成 are reserved for the case where
-  enumeration, decision and delivery are all complete and the counts add up.
+* the conclusion names only the dimensions that really are missing.  A blanket
+  "也没有保存齐" over a run whose delivery is complete is as false as claiming
+  success, even when the intent is to stay conservative;
+* the words 已查完 / 已穷尽 / 全部完成 are reserved for the case where all three
+  dimensions hold and the counts add up.
 
-A missing key is still an error: the ten counts are the frozen contract, so
-A3 always provides all of them - it may just provide None for some.
+A missing count key is still an error: the ten counts are the frozen contract,
+so A3 always provides all of them - it may just provide None for some.
 """
 from __future__ import annotations
 
 from typing import Any, Mapping
 
 REQUIRED = ("enumeration", "decision", "delivery", "counts", "denominators")
-COUNT_KEYS = (
-    "artists_checked",
-    "artists_confirmed",
-    "artists_pending",
-    "artists_failed_pages",
-    "artists_coverage_unverified",
-    "artworks_seen",
-    "pages_saved",
-    "pages_already_verified",
-    "excluded_by_filter",
-    "unknown_fields",
-)
 
 STATES = {
     "enumeration": {
@@ -46,6 +37,9 @@ STATES = {
         "complete": "保存与核验已齐",
         "partial": "部分页面未保存或未核验",
         "missing": "尚未保存",
+        # The run carried no page-level evidence, so nothing was proved either
+        # way; that is not the same statement as "nothing was saved".
+        "unknown": "保存与核验未得证明",
     },
 }
 
@@ -102,13 +96,10 @@ def _artists_sentence(confirmed, pending, failed_pages, unverified) -> str | Non
     head = None if confirmed is None else "确认当前范围处理完 %d 位" % confirmed
     rest = [
         text
-        for value, text in (
-            (pending, "%d 位待继续" % pending if pending is not None else None),
-            (failed_pages, "%d 位有失败页" % failed_pages if failed_pages is not None else None),
-            (
-                unverified,
-                "%d 位覆盖待核对" % unverified if unverified is not None else None,
-            ),
+        for text in (
+            None if pending is None else "%d 位待继续" % pending,
+            None if failed_pages is None else "%d 位有失败页" % failed_pages,
+            None if unverified is None else "%d 位覆盖待核对" % unverified,
         )
         if text is not None
     ]
@@ -124,9 +115,9 @@ def _artists_sentence(confirmed, pending, failed_pages, unverified) -> str | Non
 def _numbers_sentence(artworks, saved, already, excluded, unknown, duplicates) -> tuple[str, bool]:
     """(sentence, has_a_number); an unmeasured number never becomes a digit.
 
-    ``duplicates`` is only mentioned when it is a measured, positive number:
-    "0 duplicates" and "nobody counted duplicates" are different facts, and
-    the second one must not turn into the first.
+    The duplicate count is only mentioned when it is a measured, positive
+    number: "0 duplicates" and "nobody counted duplicates" are different facts,
+    and the second one must not turn into the first.
     """
     groups: list[str] = []
     new_and_saved: list[str] = []
@@ -138,14 +129,11 @@ def _numbers_sentence(artworks, saved, already, excluded, unknown, duplicates) -
         groups.append("、".join(new_and_saved))
     if already is not None:
         groups.append("已有 %d 页通过完整核验" % already)
-    excluded_and_unknown = [
-        text
-        for value, text in (
-            (excluded, "筛选排除 %d 件" % excluded if excluded is not None else None),
-            (unknown, "字段未知 %d 件" % unknown if unknown is not None else None),
-        )
-        if text is not None
-    ]
+    excluded_and_unknown: list[str] = []
+    if excluded is not None:
+        excluded_and_unknown.append("筛选排除 %d 件" % excluded)
+    if unknown is not None:
+        excluded_and_unknown.append("字段未知 %d 件" % unknown)
     if excluded_and_unknown:
         groups.append("，".join(excluded_and_unknown))
     if not groups:
@@ -155,6 +143,22 @@ def _numbers_sentence(artworks, saved, already, excluded, unknown, duplicates) -
         # something to refer to, which is why an empty sentence ignores it.
         groups.insert(1, "其中重复分页 %d 件（未重复保存）" % duplicates)
     return "；".join(groups) + "。", True
+
+
+def _blockers(enumeration: str, decision: str, delivery: str, consistent: bool) -> list[str]:
+    """Exactly the dimensions that did not hold, in display order."""
+    blockers: list[str] = []
+    if enumeration != "complete":
+        blockers.append("来源遍历未完成")
+    if decision != "applied":
+        blockers.append("筛选判定未完成或未应用")
+    if delivery == "unknown":
+        blockers.append("保存与核验未得证明")
+    elif delivery != "complete":
+        blockers.append("保存未齐")
+    if not consistent:
+        blockers.append("计数不自洽")
+    return blockers
 
 
 def render(coverage: Mapping) -> list[str]:
@@ -172,12 +176,8 @@ def render(coverage: Mapping) -> list[str]:
     enumeration, enumeration_reason = _state(coverage, "enumeration")
     decision, decision_reason = _state(coverage, "decision")
     delivery, delivery_reason = _state(coverage, "delivery")
-    complete = (
-        enumeration == "complete"
-        and decision == "applied"
-        and delivery == "complete"
-        and bool(coverage.get("consistent", True))
-    )
+    consistent = bool(coverage.get("consistent", True))
+    blockers = _blockers(enumeration, decision, delivery, consistent)
 
     checked = _count(counts, "artists_checked")
     confirmed = _count(counts, "artists_confirmed")
@@ -230,17 +230,19 @@ def render(coverage: Mapping) -> list[str]:
             % (STOP_REASONS.get(str(stop_reason), str(stop_reason)), stop_reason)
         )
 
-    if not coverage.get("consistent", True):
+    if not consistent:
         reasons = coverage.get("inconsistent_reasons") or []
         detail = "；".join(str(item) for item in reasons) if reasons else "计数之间对不上"
         lines.append("注意: 计数不自洽（%s），本页数字不能当作覆盖结论。" % detail)
 
-    if complete:
+    if not blockers:
         lines.append("结论: 本轮范围已查完，保存已齐。")
     else:
         # The negation must not repeat the forbidden words themselves: a reader
         # grepping for 已穷尽 should only ever find a run that really finished.
-        lines.append("结论: 本轮没有查完、也没有保存齐；这些数字不能当作覆盖结论。")
+        lines.append(
+            "结论: 以下未成立——%s；这些数字不能当作覆盖结论。" % "、".join(blockers)
+        )
     return lines
 
 
