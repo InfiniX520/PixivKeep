@@ -35,12 +35,16 @@ DTO v1（入口规范化，冲突即拒）：
 | 字段 | 生产者 | 消费者 | 未知时 |
 | --- | --- | --- | --- |
 | `run.totals.artists_total` | `gather_facts`（把仓库的 `total_artists` 规范化成这一个名字） | `coverage_counts` 分母 | 缺 → `None` |
-| `artists[].works_seen`（原 `pages` 更名，语义=该画师看到的**作品**数） | `gather_facts` | counts 的 `artworks_seen` | 缺 → `None` |
+| `artists[].works_seen`（原 `pages` 更名，语义=该画师看到的**作品**数） | `gather_facts` | 报告里的 `counts.artworks_seen` | 缺 → `None` |
+
+> 词表说明（2026-11-15 合并时确认）：**DTO 字段名与报告键故意不同名** —— 事实层叫 `run.totals.works_seen` / `artists[].works_seen`，报告层叫 `counts.artworks_seen`。理由是红基线 UX-05 已经断言了报告键 `artworks_seen`，报告词表服从已发布的验收；别名只在入口规范化，两种拼写同时出现且值不同即拒绝。
 | 作品层：`works_seen / excluded_by_filter / works_deliverable / works_unknown` | counts | 文案、完成判定 | 各自 `None` |
 | 页层：`pages_expected / pages_saved_new / pages_already_verified / pages_failed / pages_pending_verify` | counts（需要页集证据） | 完成判定 | 无页集 → `pages_expected=None` → 交付只能 `unknown` |
 
 单位铁律：**作品 ≠ 图片页**。不许用 `works_seen - excluded <= pages_saved` 宣布完成，也不许要求 `works_seen == pages_saved + excluded` 来判自洽（一作品多页时天然不等）。
-交付 `complete` 需要：当前可见范围明确 **且** 该范围内每个应保存页都有匹配内容版本的有效证据。只给到 crawl 事实时，交付保持 `unknown`。
+交付 `complete` 需要：当前可见范围明确 **且** 该范围内每个应保存页都有匹配内容版本的有效证据。只给到 crawl 事实时（没有页集与内容版本），交付保持 `unknown`（reason `page_evidence_missing:pages_expected`）。
+
+**唯一的例外**：当前可见范围被明确证明为空（关注列表为空、`no_artists`）时，"每个应保存页都有证据"对空集成立，可以 `complete`。这是空集语义，不是"证据缺失也能 complete"的捷径，两侧都有测试。
 
 ## 4. 依赖判断（UX-07）
 
