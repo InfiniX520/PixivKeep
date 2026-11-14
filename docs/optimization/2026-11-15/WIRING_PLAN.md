@@ -54,3 +54,20 @@ maintain.py filter-explain --candidates <file.jsonl> --conditions <file.json> [-
 2. 退出码表逐行有测试（0/2/3/5 各自的触发条件）；
 3. 只读性有 AST 或运行期断言（不出现 `execute` 写语句、不出现 `commit`、不出现网络模块）；
 4. 全量 `tests/` 不回归；红基线 17 条仍全绿。
+
+
+## 6. E1 离线引擎的 CLI（第三步，本轮补）
+
+E1 的五个离线模块（batches / rules / group_scope / conflicts / report）目前只有库函数。它们**不联网**，所以命令的输入是本地 JSON，输出是纯数据 + 文本：
+
+```text
+organize.py batch-plan   --pool <pool.json> --max-artists N --max-requests N --max-bytes N --max-seconds N [--json]
+organize.py scope-plan   --snapshot <snapshot.json> --group NAME [--group show:NAME] ... [--json]
+organize.py batch-report --batch <batch.json> --decisions <decisions.json> --scope <scope.json> [--json]
+```
+
+退出码：`0` 只有"输入完整且结论成立"；`3` 输入不可读/参数被拒/快照不完整；`5` 结论依赖的证据缺失（例如没有实测数据时报告里的 planned_vs_measured 只能是 unknown，命令仍给 0 但文本必须写「未知」，**不许**把未知写成 0）。
+
+**这些命令不读真实账号、不连网、不写任何文件**：输入是本地 JSON（可以是导出的快照，也可以是合成夹具），输出只到 stdout。真正的联网动作（snapshot/sample/apply）仍由 E1-2 既有命令承担，且 `--execute` 类写回永远不在这批命令里。
+
+文件归属：`organizer/offline_cli.py`（新建，三个命令的实现）+ `organize.py` 的三处注册 + `tests/test_organizer_offline_cli.py`（新建）。
