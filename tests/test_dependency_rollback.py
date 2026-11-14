@@ -11,12 +11,18 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from tools.maintenance import dependency_env  # noqa: E402  (read-only use)
 from tools.maintenance.dependency_rollback import (  # noqa: E402
     DEFAULT_STATES,
     rollback_material,
 )
 
 MODULE = ROOT / "tools" / "maintenance" / "dependency_rollback.py"
+
+#: The contract vocabulary, written out here on purpose: a test that imported
+#: the module's own constants would agree with any change to them.
+ADVISORY_LEGAL = ["unknown", "matched", "not_matched"]
+COMPAT_LEGAL = ["not_run", "passed", "failed"]
 
 ENV = {
     "python": {
@@ -45,35 +51,68 @@ def test_default_states_describe_a_preparation_only_batch():
     assert states["compat_checked"] == "not_run"
 
 
-def test_states_can_be_overridden_for_the_batch_that_really_upgrades():
+def test_the_module_constants_match_the_contract_vocabulary():
+    # Written out in the test above, so this is not circular.
+    from tools.maintenance import dependency_rollback as module
+
+    assert list(module.ADVISORY_STATES) == ADVISORY_LEGAL
+    assert list(module.COMPAT_STATES) == COMPAT_LEGAL
+
+
+@pytest.mark.parametrize("value", ADVISORY_LEGAL)
+def test_advisory_matched_accepts_every_legal_value(value):
+    states = rollback_material(ENV, at={"advisory_matched": value})["three_states"]
+    assert states["advisory_matched"] == value
+    assert states["upgrade_done"] is False, "a string state must not touch upgrade_done"
+    assert states["compat_checked"] == "not_run"
+
+
+@pytest.mark.parametrize("value", ["yes", "ok", "done", "", "matched ", None, True, 1])
+def test_advisory_matched_refuses_anything_else(value):
+    with pytest.raises(ValueError, match="advisory_matched"):
+        rollback_material(ENV, at={"advisory_matched": value})
+
+
+@pytest.mark.parametrize("value", COMPAT_LEGAL)
+def test_compat_checked_accepts_every_legal_value(value):
+    states = rollback_material(ENV, at={"compat_checked": value})["three_states"]
+    assert states["compat_checked"] == value
+    assert states["advisory_matched"] == "unknown"
+
+
+@pytest.mark.parametrize("value", ["yes", "unknown", "ok", "", None, False, 0])
+def test_compat_checked_refuses_anything_else(value):
+    with pytest.raises(ValueError, match="compat_checked"):
+        rollback_material(ENV, at={"compat_checked": value})
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_upgrade_done_accepts_only_bool(value):
+    states = rollback_material(ENV, at={"upgrade_done": value})["three_states"]
+    assert states["upgrade_done"] is value
+
+
+@pytest.mark.parametrize("value", ["true", "yes", 1, 0, None])
+def test_upgrade_done_refuses_non_bools(value):
+    with pytest.raises(ValueError, match="upgrade_done"):
+        rollback_material(ENV, at={"upgrade_done": value})
+
+
+def test_states_can_be_overridden_together():
     material = rollback_material(
         ENV,
-        at={"advisory_matched": "checked", "upgrade_done": True, "compat_checked": "passed"},
+        at={"advisory_matched": "matched", "upgrade_done": True, "compat_checked": "passed"},
     )
     assert material["three_states"] == {
-        "advisory_matched": "checked",
+        "advisory_matched": "matched",
         "upgrade_done": True,
         "compat_checked": "passed",
     }
 
 
-def test_a_partial_override_keeps_the_other_defaults():
-    states = rollback_material(ENV, at={"upgrade_done": True})["three_states"]
-    assert states["upgrade_done"] is True
-    assert states["advisory_matched"] == "unknown"
-    assert states["compat_checked"] == "not_run"
-
-
 def test_unknown_state_keys_are_refused_instead_of_ignored():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="unknown three-state key"):
         rollback_material(ENV, at={"upgraded": True})
-
-
-def test_upgrade_done_must_be_a_bool_and_strings_must_be_non_empty():
-    with pytest.raises(ValueError):
-        rollback_material(ENV, at={"upgrade_done": "yes"})
-    with pytest.raises(ValueError):
-        rollback_material(ENV, at={"compat_checked": "  "})
 
 
 def test_at_must_be_a_mapping():
@@ -81,9 +120,11 @@ def test_at_must_be_a_mapping():
         rollback_material(ENV, at=[])
 
 
-def test_packages_are_sorted_and_carry_name_and_version_only():
+def test_packages_are_sorted_by_lowercase_name_then_version():
     material = rollback_material(ENV)
-    assert [item["name"] for item in material["packages"]] == ["PyYAML", "pixivpy3", "requests"]
+    # Independent expectation: lowercase order of these three is pixivpy3,
+    # pyyaml, requests (i < y < r is false, r is last because 'r' > 'p').
+    assert [item["name"] for item in material["packages"]] == ["pixivpy3", "PyYAML", "requests"]
     assert all(set(item) == {"name", "version"} for item in material["packages"])
 
 
@@ -91,7 +132,36 @@ def test_a_duplicate_package_keeps_one_entry():
     env = copy.deepcopy(ENV)
     env["installed"].append({"name": "requests", "version": "2.31.0"})
     packages = rollback_material(env)["packages"]
-    assert sum(1 for item in packages if item["name"] == "requests") == 1
+    assert sum(1 for item in packages if item["name"].lower() == "requests") == 1
+    assert [item["version"] for item in packages if item["name"] == "requests"] == ["2.31.0"]
+
+
+def test_a_case_different_name_is_one_package_at_a_stable_position():
+    env = {"installed": [
+        {"name": "PyQt5", "version": "5.15.0"},
+        {"name": "aaa", "version": "1.0"},
+        {"name": "pyqt5", "version": "5.15.9"},
+    ]}
+    packages = rollback_material(env)["packages"]
+    assert [item["name"] for item in packages] == ["aaa", "PyQt5"]
+    # The first spelling is kept, the last version wins.
+    assert packages[1]["version"] == "5.15.9"
+
+
+def test_the_order_agrees_with_what_dependency_env_publishes():
+    rows, _errors = dependency_env._installed()
+    if not rows:
+        pytest.skip('the environment reported no installed distributions')
+    material = rollback_material({"installed": rows})
+    seen = set()
+    expected = []
+    for row in rows:
+        key = row["name"].lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        expected.append(row["name"])
+    assert [item["name"] for item in material["packages"]] == expected
 
 
 def test_interpreter_carries_the_executable_and_version():
