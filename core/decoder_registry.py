@@ -35,6 +35,12 @@ NO_DECODER = "no_decoder_component"
 STRUCTURE_ONLY = "structure_only"
 RESULT_INVALID = "decoder_result_invalid"
 
+#: The longest reason this module will hand out, marker included.  A receipt is
+#: an artefact people read and store, so it must not carry an unbounded string
+#: from a decoder that misbehaved (core.candidate_filter keeps the same rule).
+REASON_LIMIT = 120
+TRUNCATED = ":truncated"
+
 #: Tokens accepted by :func:`normalise_format`; media types and suffixes map onto
 #: the same short names so a caller cannot create a second vocabulary by accident.
 _ALIASES = {
@@ -128,6 +134,39 @@ def _decoder_name(decoder: Decoder | None) -> str | None:
     return name if isinstance(name, str) and name else type(decoder).__name__
 
 
+def _safe_type_name(error: BaseException) -> str:
+    """The exception type, and only when it looks like a short identifier."""
+    name = type(error).__name__
+    if not isinstance(name, str) or not name.isidentifier() or len(name) > 64:
+        return "Exception"
+    return name
+
+
+def _safe_error_code(error: BaseException) -> str:
+    """A bounded code for a decoder that raised; never the raw message.
+
+    The message can hold an absolute path, a user name, a fragment of the file
+    or several kilobytes of text, and none of that belongs in a receipt.  What
+    survives is the exception *type* (as an identifier) plus, when the error
+    carries one, the numeric errno - both bounded and content free.
+    """
+    code = "decoder_error:" + _safe_type_name(error)
+    errno = getattr(error, "errno", None)
+    if type(errno) is int:
+        code += ":errno-%d" % errno
+    return code
+
+
+def _bounded_reason(value: object) -> str | None:
+    """A decoder supplied reason, cut to a visible, bounded length."""
+    if not isinstance(value, str) or not value:
+        return None
+    text = value.strip()
+    if len(text) <= REASON_LIMIT:
+        return text
+    return text[: REASON_LIMIT - len(TRUNCATED)] + TRUNCATED
+
+
 def _outcome_from(decoder: Decoder, result: object) -> DecodeOutcome:
     """Normalise whatever the decoder returned; a strange shape is a failure."""
     name = _decoder_name(decoder)
@@ -136,10 +175,7 @@ def _outcome_from(decoder: Decoder, result: object) -> DecodeOutcome:
     state = result.get("decode")
     if state not in {DECODE_OK, DECODE_FAILED, DECODE_UNDECIDED}:
         return DecodeOutcome(DECODE_FAILED, RESULT_INVALID, name)
-    reason = result.get("reason")
-    return DecodeOutcome(
-        str(state), reason if isinstance(reason, str) and reason else None, name
-    )
+    return DecodeOutcome(str(state), _bounded_reason(result.get("reason")), name)
 
 
 def decode_with(
@@ -171,9 +207,5 @@ def decode_with(
     try:
         result = decoder.decode(path, limits=limits, stop=stop)
     except Exception as error:  # noqa: BLE001 - a decoder failure is data, not a crash
-        return DecodeOutcome(
-            DECODE_FAILED,
-            "decoder_error:%s:%s" % (type(error).__name__, error),
-            _decoder_name(decoder),
-        )
+        return DecodeOutcome(DECODE_FAILED, _safe_error_code(error), _decoder_name(decoder))
     return _outcome_from(decoder, result)

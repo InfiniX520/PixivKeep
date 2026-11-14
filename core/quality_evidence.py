@@ -159,21 +159,30 @@ class QualityEvidence:
 
 @dataclass(frozen=True, slots=True)
 class DecodeReceipt:
-    """What one decode attempt measured, including the attempt that could not run."""
+    """What one decode attempt measured, including the attempt that could not run.
+
+    A measurement that never happened is `None`, never `0`: a missing decoder or
+    a limit stop has no frame count, no pixel count and no duration, and writing
+    zero there would read as "measured zero pixels in zero seconds" - a fact we
+    do not have.  Zero stays legal for a real measurement (a decoder did run and
+    produced no frame), so `None` and `0` keep different meanings.
+    """
 
     format: str
-    frames: int
-    pixels: int
+    frames: int | None
+    pixels: int | None
     limits: Mapping[str, int | float]
     decoder: str
     outcome: str
-    seconds: float
+    seconds: float | None
     checked_at: str
 
     def __post_init__(self) -> None:
         _text(self.format, code="receipt_field_invalid", what="format")
         for name in ("frames", "pixels"):
             value = getattr(self, name)
+            if value is None:
+                continue
             if type(value) is not int or value < 0:
                 raise QualityEvidenceError("receipt_field_invalid", "%s=%r" % (name, value))
         if not isinstance(self.limits, Mapping):
@@ -190,9 +199,10 @@ class DecodeReceipt:
                 "receipt_outcome_invalid",
                 "%r (allowed: %s)" % (self.outcome, ", ".join(DECODE_OUTCOMES)),
             )
-        if type(self.seconds) not in (int, float) or self.seconds < 0:
-            raise QualityEvidenceError("receipt_field_invalid", "seconds=%r" % (self.seconds,))
-        object.__setattr__(self, "seconds", float(self.seconds))
+        if self.seconds is not None:
+            if type(self.seconds) not in (int, float) or self.seconds < 0:
+                raise QualityEvidenceError("receipt_field_invalid", "seconds=%r" % (self.seconds,))
+            object.__setattr__(self, "seconds", float(self.seconds))
         _text(self.checked_at, code="receipt_field_invalid", what="checked_at")
 
     def as_dict(self) -> dict[str, Any]:
