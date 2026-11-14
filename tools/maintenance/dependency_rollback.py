@@ -13,17 +13,33 @@ uninstall or upgrade anything, and a test asserts that by walking its own AST.
 
 Contract (U1-B five-way split, lane R):
     rollback_material(env, *, at) -> {
-      "packages": [{"name", "version"}],     # sorted, de-duplicated by name
+      "packages": [{"name", "version"}],
       "interpreter": {"executable", "version"},
       "restore_steps": [str],
       "window_conditions": [str],
       "three_states": {"advisory_matched", "upgrade_done", "compat_checked"}
     }
 
-The three states are deliberately separate, because 'the advisory was read',
-'the upgrade happened' and 'compatibility was checked' are three different
-facts and a single boolean would let one stand in for another.  Their defaults
-describe a batch that prepared the material and changed nothing.
+The three states answer three different questions and are never
+interchangeable:
+
+    advisory_matched  did anyone match this environment against a known
+                      advisory / release note?  "unknown" means nobody
+                      looked, which is not the same as "not_matched".
+    upgrade_done      did an install, upgrade or uninstall actually happen?
+                      A bool, because there is no partial answer.
+    compat_checked    was the compatible behaviour verified afterwards?
+                      "not_run" is not "passed".
+
+All three are closed vocabularies on purpose: a free string would let a
+typo such as 'yes' or 'ok' reach a downstream reader that treats any
+non-default value as 'this was done'.
+
+Package order is case-insensitive by lowercase name, then version, which is
+the same order dependency_env.environment_facts() publishes.  On a
+case-insensitive filesystem one package must not appear twice because its
+name was recorded once as 'PyQt5' and once as 'pyqt5', so names are
+de-duplicated by lowercase as well.
 """
 from __future__ import annotations
 
@@ -37,6 +53,10 @@ DEFAULT_STATES = {
     "upgrade_done": False,
     "compat_checked": "not_run",
 }
+
+#: The closed vocabulary of each string state.  Anything else is refused.
+ADVISORY_STATES = ("unknown", "matched", "not_matched")
+COMPAT_STATES = ("not_run", "passed", "failed")
 
 _STATE_KEYS = tuple(DEFAULT_STATES)
 
@@ -56,27 +76,43 @@ def _now_utc() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 
 
-def _packages(env: object) -> list[dict[str, object]]:
-    """The frozen package list, sorted and de-duplicated by name.
+def _sort_key(item: Mapping[str, object]) -> tuple[str, str]:
+    """The order dependency_env publishes: lowercase name, then version."""
+    name = str(item.get("name") or "").lower()
+    version = item.get("version")
+    return (name, "" if version is None else str(version))
 
-    A name that appears twice keeps the last version seen: a listing that
-    contradicts itself must not be presented as two different packages.
+
+def _packages(env: object) -> list[dict[str, object]]:
+    """Frozen package list: one entry per package name, in dependency_env order.
+
+    Names are de-duplicated case-insensitively, because a case-insensitive
+    filesystem cannot hold 'PyQt5' and 'pyqt5' as two different packages.
+    The first spelling seen is kept (it is the one the environment reported
+    first) and the last version seen wins, so a listing that contradicts
+    itself still yields exactly one row.
     """
     if not isinstance(env, Mapping):
         return []
     raw = env.get("installed")
     if not isinstance(raw, list):
         return []
-    seen: dict[str, object] = {}
+    seen: dict[str, dict[str, object]] = {}
     for item in raw:
         if not isinstance(item, Mapping):
             continue
         name = item.get("name")
         if not isinstance(name, str) or not name.strip():
             continue
+        clean = name.strip()
+        key = clean.lower()
         version = item.get("version")
-        seen[name.strip()] = None if version is None else str(version)
-    return [{"name": name, "version": seen[name]} for name in sorted(seen)]
+        value = None if version is None else str(version)
+        if key in seen:
+            seen[key]["version"] = value
+        else:
+            seen[key] = {"name": clean, "version": value}
+    return sorted(seen.values(), key=_sort_key)
 
 
 def _interpreter(env: object) -> dict[str, object]:
@@ -97,11 +133,12 @@ def _interpreter(env: object) -> dict[str, object]:
 
 
 def _states(at: object) -> dict[str, object]:
-    """Default three states, optionally overridden by the caller.
+    """The three states, validated against their closed vocabularies.
 
     Overrides exist for the batch that really does upgrade something later; a
-    caller can then say upgrade_done=True and compat_checked="passed" without
-    this module ever gaining a code path that performs the change.
+    caller can then say upgrade_done=True and compat_checked='passed' without
+    this module ever gaining a code path that performs the change.  A value
+    outside the vocabulary is refused by name instead of being stored.
     """
     states = dict(DEFAULT_STATES)
     if at is None:
@@ -123,9 +160,12 @@ def _states(at: object) -> dict[str, object]:
                 raise ValueError("upgrade_done must be a bool, not %r" % (value,))
             states[key] = value
             continue
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError("%s must be a non-empty string, not %r" % (key, value))
-        states[key] = value.strip()
+        allowed = ADVISORY_STATES if key == "advisory_matched" else COMPAT_STATES
+        if not isinstance(value, str) or value not in allowed:
+            raise ValueError(
+                "%s must be one of %s, not %r" % (key, "/".join(allowed), value)
+            )
+        states[key] = value
     return states
 
 
