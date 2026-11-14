@@ -545,17 +545,25 @@ def _copy_file(source: Path, destination: object) -> dict[str, object]:
     """
     digest = hashlib.sha256()
     total = 0
-    with source.open("rb") as reader, _owned_writer(destination) as writer:  # type: ignore[union-attr]
-        while True:
-            chunk = reader.read(_CHUNK_BYTES)
-            if not chunk:
-                break
-            digest.update(chunk)
-            writer.write(chunk)
-            total += len(chunk)
-        writer.flush()
-        os.fsync(writer.fileno())
-    return {"name": destination.name, "bytes": total, "sha256": digest.hexdigest()}
+    # The source is opened first: if it cannot be read, the destination has not
+    # been truncated yet and the caller's "this member vanished" path still
+    # holds a claimed member it can release.
+    with source.open("rb") as reader:
+        with _owned_writer(destination) as writer:  # type: ignore[union-attr]
+            while True:
+                chunk = reader.read(_CHUNK_BYTES)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                writer.write(chunk)
+                total += len(chunk)
+            writer.flush()
+            os.fsync(writer.fileno())
+    return {
+        "name": getattr(destination, "name", str(destination)),
+        "bytes": total,
+        "sha256": digest.hexdigest(),
+    }
 
 
 def _discard(workspace: TemporaryWorkspace) -> dict[str, object]:
