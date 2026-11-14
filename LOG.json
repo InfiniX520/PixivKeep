@@ -1,7 +1,7 @@
 {
   "project": "PixivKeep",
   "description": "Pixiv 原图收藏与整理工具；长期归档与恢复开发中",
-  "last_updated": "2026-11-14",
+  "last_updated": "2026-11-15",
   "sessions": [
     {
       "session_date": "2026-07-30",
@@ -2305,6 +2305,50 @@
           "p3_fixed": 4
         }
       }
+    },
+    {
+      "id": "JPGPNG-U1U2-AUDIT-FIX-20261115-01",
+      "session_date": "2026-11-15",
+      "status": "audit_findings_fixed_pending_reaudit",
+      "summary": "Fixed the 1 P1 + 7 P2 from the 031627c independent audit: ownership now spans create/write/SQLite/cleanup with claim identity checked before any write and sidecars retained when unprovable; the quality engine has one command-wide budget, a content version with path stability, four transport states and palette-bounds checking; coverage separates works from pages and only calls delivery complete when page evidence exists; the dependency report is schema 2 with input completeness in the exit code and every applicable constraint aggregated.",
+      "audited_commit": "031627c64eb2aac5605b05a21a47a7c0b3c5fef2",
+      "product_baseline": "4ba891e",
+      "report": "docs/optimization/2026-11-15/FIX_CONTRACTS.md",
+      "contract": "docs/optimization/2026-11-15/FIX_CONTRACTS.md",
+      "results": {
+        "independent_counterexamples": {
+          "tests": 17,
+          "passed": 17,
+          "before": "15 failed / 2 passed"
+        },
+        "full_matrix": {
+          "tests": 3095,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 4,
+          "seconds": 695.38
+        },
+        "tk_modules": {
+          "view": 25,
+          "collection": 4,
+          "source": 5,
+          "note": "one setup-only Tcl error was retried and recorded"
+        }
+      },
+      "new_findings": [],
+      "previous_product_findings_open": [],
+      "open_risks": [
+        "Tk Tcl initialisation flake (pre-existing) is still not root-caused",
+        "log-view 10 ms flush race (pre-existing) can fail once under load",
+        "a failed file-group backup now keeps SQLite sidecars it cannot prove it owns",
+        "coverage and filter engines are not wired into the UI or a CLI yet",
+        "JPEG/GIF/WebP strict decode stays capability_unavailable (no component installed)"
+      ],
+      "product_source_changed": true,
+      "business_data_changed": false,
+      "deployed": false,
+      "merged_to_main": false,
+      "read_only_audit": false
     }
   ]
 }

@@ -1507,5 +1507,69 @@
         }
       }
     }
-  }
+  },
+  "phases_R9": [
+    {
+      "phase": "U1/U2 独立审计修复（2026-11-15）",
+      "goal": "把 031627c 上的 1 P1 + 7 P2 修掉，并让审计的 17 项独立反例全绿；在此之前不接界面、不部署",
+      "tasks": [
+        {
+          "id": "R9-0",
+          "title": "冻结四个共同契约 + 引入红基线",
+          "strategy": "写 docs/optimization/2026-11-15/FIX_CONTRACTS.md（所有权/质量观察/覆盖事实/依赖判断，每字段生产者+消费者+未知写法）；审计的 test_independent.py 原样带入为 tests/test_audit_independent_20261115.py，冻结 15 红 / 2 绿",
+          "risk": "红基线不许改；改了就等于自证",
+          "status": "已完成",
+          "verify": "红基线原样运行 15 failed / 2 passed"
+        },
+        {
+          "id": "R9-1",
+          "title": "S1 所有权与错误协议（UX-01 P1 + WR-04）",
+          "strategy": "claim() 返回携带身份的 ClaimedFile；写前 verify_owned；sidecar 无法证明归属即留存并点名；主失败与清理失败分字段，finally 不覆盖前因",
+          "risk": "把假成功换成诚实失败会让失败后残留目录",
+          "status": "已完成",
+          "verify": "tests/test_s1_ownership_protocol.py 11 项 + 红基线两条 UX-01 与 WR-04 转绿"
+        },
+        {
+          "id": "R9-2",
+          "title": "S2 质量引擎（UX-02/03/04）",
+          "strategy": "CommandBudget 覆盖整条命令五个阶段；content_version + path_stability；transport 四态；索引色按 PLTE 项数与每趟像素数校验",
+          "risk": "一次完整检查约 4×文件大小读盘",
+          "status": "已完成",
+          "verify": "tests/test_s2_quality_engine.py 52 项 + 173 项回归 + 红基线四条转绿"
+        },
+        {
+          "id": "R9-3",
+          "title": "S3 覆盖事实与单位（UX-05/06）",
+          "strategy": "DTO 字段与报告词表分离并在入口规范化；作品层与页层分开；交付 complete 需页集与每页内容版本证据；补真实 repository 整链测试",
+          "risk": "真实 crawl 状态库没有页集，只能到 unknown",
+          "status": "已完成",
+          "verify": "226 项 follow 测试 + 红基线三条转绿"
+        },
+        {
+          "id": "R9-4",
+          "title": "S4 依赖报告（UX-07）",
+          "strategy": "schema 2：输入完整性参与 verdict/退出码；按名聚合全部适用约束；marker 只有证明不适用才排除；不适用的声明不算 missing/unused",
+          "risk": "schema 变更需要文档同步",
+          "status": "已完成",
+          "verify": "126 项依赖测试 + 红基线五条转绿"
+        },
+        {
+          "id": "R9-5",
+          "title": "集成：CLI 出口 + 全量验收 + 文档状态同步",
+          "strategy": "decode-check 增加版本稳定性门与未证明文案；README/IMPLEMENTATION/TASK_PLAN/LOG 同步；红基线 17/17；全量矩阵",
+          "risk": "无",
+          "status": "已完成",
+          "verify": "红基线 17 passed；矩阵 3095 passed / 0 failed / 4 skipped；Tk 25+4+5"
+        },
+        {
+          "id": "R9-6",
+          "title": "S5 筛选原因码统一（P3）与界面接线",
+          "strategy": "filter_explain 改用 filter_reasons 的构造入口并修 FrozenReason 的 |= 漏洞；覆盖摘要/筛选解释/保存方案的 UI 与 CLI 接线单列",
+          "risk": "界面接线会碰 Tk 已知稳定性问题",
+          "status": "待处理",
+          "verify": "待做"
+        }
+      ]
+    }
+  ]
 }

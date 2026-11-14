@@ -1,6 +1,8 @@
 # PixivKeep
 
-**当前独立审计（2026-11-14，post-tidy 修复复核）**：候选 `9ee6206` 已修复多项旧问题，但仍有 **1 P1 + 5 P2**（含 WR-04/WR-06/PA-03 未完全关闭）；现有套件 **2,259 通过 / 4 跳过**，新独立反例 **12 红 / 2 绿**。优先修核验临时目录清理越权，再收口错误协议、恢复检查和刷新代次。日常仍为 `4ba891e`，未部署；另有既知 Tk 稳定性问题。先读[独立审计](docs/audits/2026-11-14-post-tidy-closure/README.md)与[开发指导](docs/audits/2026-11-14-post-tidy-closure/DEVELOPMENT_GUIDE.md)。
+**当前状态（2026-11-15，U1/U2 审计修复）**：被审候选 `031627c` 的 **1 P1 + 7 P2 已全部修复**，审计的 17 项独立反例从 **15 红 / 2 绿** 变为 **17/17 全绿**；现有套件 **3,095 通过 / 4 跳过**（另有两个已登记的环境 flake：Tk 初始化、log-view 10 ms 刷盘竞态）。
+修复分支 `fix/a1-u1u2-audit-20261115`，日常仍为 `4ba891e`，**未部署**；E1-3/E1-4 与覆盖摘要/筛选解释的界面接线尚未开始。
+先读[本轮审计](.runtime/jpgpng_u1u2_audit_20261115_01/review/docs/audits/2026-11-15-u1u2-independent/FINDINGS.md)、[开发指导](.runtime/jpgpng_u1u2_audit_20261115_01/review/docs/audits/2026-11-15-u1u2-independent/DEVELOPMENT_GUIDE.md)与[四个契约](docs/optimization/2026-11-15/FIX_CONTRACTS.md)。
 
 **把喜欢的 Pixiv 作品，按原图好好留下来。**
 
