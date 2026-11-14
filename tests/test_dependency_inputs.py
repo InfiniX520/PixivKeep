@@ -135,9 +135,14 @@ def installed_view(*pairs):
     return {"installed": [{"name": name, "version": version} for name, version in pairs]}
 
 
+def runtime_view(*specifiers, name="example"):
+    """A declared view with several constraints on one runtime name."""
+    return declared_view(runtime=[{"name": name, "specifier": item} for item in specifiers])
+
+
 def test_every_runtime_constraint_of_a_name_is_enforced():
     result = matrix.compare(
-        declared_view(runtime=[{"name": "example", "specifier": ">=1"}, {"name": "example", "specifier": "<2"}]),
+        runtime_view(">=1", "<2"),
         installed_view(("example", "2.5")),
         {"modules": []},
     )
@@ -149,7 +154,7 @@ def test_every_runtime_constraint_of_a_name_is_enforced():
 
 def test_satisfied_constraints_still_pass_when_a_name_is_declared_twice():
     result = matrix.compare(
-        declared_view(runtime=[{"name": "example", "specifier": ">=1"}, {"name": "example", "specifier": "<3"}]),
+        runtime_view(">=1", "<3"),
         installed_view(("example", "2.5")),
         {"modules": []},
     )
@@ -159,14 +164,9 @@ def test_satisfied_constraints_still_pass_when_a_name_is_declared_twice():
 
 def test_a_repeated_identical_constraint_is_not_repeated_in_the_row():
     result = matrix.compare(
-        declared_view(runtime=[{"name": "example", "specifier": ">=1"}, {"name": "example", "specifier": ">=1"}]),
-        installed_view(("example", "2.5")),
-        {"modules": []},
+        runtime_view(">=1", ">=1"), installed_view(("example", "2.5")), {"modules": []}
     )
-    rows = matrix.constraints(declared_view(runtime=[
-        {"name": "example", "specifier": ">=1"},
-        {"name": "example", "specifier": ">=1"},
-    ]))
+    rows = matrix.constraints(runtime_view(">=1", ">=1"))
     assert rows[0]["applies"] == [">=1"]
     assert result["verdict"] == "ok"
 
@@ -186,7 +186,7 @@ def test_a_runtime_constraint_is_not_downgraded_by_a_dev_one():
 
 
 def test_a_marker_that_does_not_apply_is_excluded_not_ignored():
-    view = declared_view(runtime=[{"name": "example", "specifier": ">=99 ; python_version < '3.0'"}])
+    view = runtime_view(">=99 ; python_version < '3.0'")
     result = matrix.compare(view, installed_view(("example", "1.0")), {"modules": []})
     assert result["verdict"] == "ok"
     rows = matrix.constraints(view)
@@ -195,14 +195,14 @@ def test_a_marker_that_does_not_apply_is_excluded_not_ignored():
 
 
 def test_a_marker_that_applies_is_enforced():
-    view = declared_view(runtime=[{"name": "example", "specifier": ">=99 ; python_version >= '3.0'"}])
+    view = runtime_view(">=99 ; python_version >= '3.0'")
     result = matrix.compare(view, installed_view(("example", "1.0")), {"modules": []})
     assert result["verdict"] == "attention"
     assert result["version_mismatch"][0]["declared"] == ">=99"
 
 
 def test_an_unparsable_marker_is_unjudged_and_shown():
-    view = declared_view(runtime=[{"name": "example", "specifier": ">=1 ; python_version is not a thing"}])
+    view = runtime_view(">=1 ; python_version is not a thing")
     result = matrix.compare(view, installed_view(("example", "2.5")), {"modules": []})
     assert result["verdict"] == "unknown"
     assert result["version_mismatch"] == []
@@ -223,7 +223,15 @@ def test_extras_are_recorded_separately_from_the_specifier():
 def test_sources_are_attached_when_the_declared_view_carries_them():
     view = declared_view(
         runtime=[{"name": "example", "specifier": ">=1"}],
-        sources=[{"name": "example", "specifier": ">=1", "file": "requirements.txt", "line": 3, "group": "runtime"}],
+        sources=[
+            {
+                "name": "example",
+                "specifier": ">=1",
+                "file": "requirements.txt",
+                "line": 3,
+                "group": "runtime",
+            }
+        ],
     )
     rows = matrix.constraints(view)
     assert rows[0]["sources"] == [
@@ -247,8 +255,20 @@ def test_the_declaration_sources_come_from_the_parser_with_file_and_line(tmp_pat
     (tmp_path / "requirements-dev.txt").write_text("pytest>=7\n", "utf-8")
     view = dependency_declared.declared_requirements(tmp_path)
     assert view["sources"] == [
-        {"name": "requests", "specifier": ">=2.0", "file": "requirements.txt", "line": 2, "group": "runtime"},
-        {"name": "pytest", "specifier": ">=7", "file": "requirements-dev.txt", "line": 1, "group": "dev"},
+        {
+            "name": "requests",
+            "specifier": ">=2.0",
+            "file": "requirements.txt",
+            "line": 2,
+            "group": "runtime",
+        },
+        {
+            "name": "pytest",
+            "specifier": ">=7",
+            "file": "requirements-dev.txt",
+            "line": 1,
+            "group": "dev",
+        },
     ]
     rows = {row["name"]: row for row in matrix.constraints(view)}
     assert rows["requests"]["sources"][0]["line"] == 2
@@ -258,5 +278,11 @@ def test_the_declaration_sources_come_from_the_parser_with_file_and_line(tmp_pat
 
 def test_the_matrix_result_keeps_the_frozen_five_keys():
     result = matrix.compare(declared_view(), installed_view(), {"modules": []})
-    assert set(result) == {"missing", "unexpected", "unused_declared", "version_mismatch", "verdict"}
+    assert set(result) == {
+        "missing",
+        "unexpected",
+        "unused_declared",
+        "version_mismatch",
+        "verdict",
+    }
 

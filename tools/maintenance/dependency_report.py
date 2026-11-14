@@ -117,7 +117,10 @@ def build_report(root: Path | None = None) -> dict:
     # read through env["installed"] and the import view needs every row to carry
     # a real top_level, so parse failures are filtered out here (they are
     # reported separately as unparsed, and they make inputs.imports.ok False).
-    matrix = dependency_matrix.compare(declared, env, {"modules": [item for item in imported.get("modules") or [] if item.get("top_level")]})
+    parsed_imports = [
+        item for item in imported.get("modules") or [] if item.get("top_level")
+    ]
+    matrix = dependency_matrix.compare(declared, env, {"modules": parsed_imports})
     rollback = dependency_rollback.rollback_material(env)
     inputs = collect_inputs(declared, imported, env)
     aggregated = dependency_matrix.constraints(declared)
@@ -209,9 +212,14 @@ def _lines(report: dict) -> list[str]:
     matrix = report["matrix"]
     inputs = report["inputs"]
     lines = [
-        "环境: %s %s（%s）" % (python.get("implementation"), python.get("version"), python.get("executable")),
+        "环境: %s %s（%s）"
+        % (python.get("implementation"), python.get("version"), python.get("executable")),
         "平台: %s %s" % (platform.get("system"), platform.get("release")),
-        "pip check: exit=%s %s" % ((env.get("pip_check") or {}).get("exit"), (env.get("pip_check") or {}).get("output", "").strip()[:60]),
+        "pip check: exit=%s %s"
+        % (
+            (env.get("pip_check") or {}).get("exit"),
+            (env.get("pip_check") or {}).get("output", "").strip()[:60],
+        ),
         "已装分发包: %d" % report["installed_count"],
         "声明: runtime %d / dev %d / build %d（文件 %d）"
         % (
@@ -220,7 +228,8 @@ def _lines(report: dict) -> list[str]:
             len(report["declared"].get("build") or []),
             len(report["declared"].get("files") or []),
         ),
-        "import: %d 个顶层模块，未解析文件 %d" % (len(report["imports"]["modules"]), len(report["imports"]["unparsed"])),
+        "import: %d 个顶层模块，未解析文件 %d"
+        % (len(report["imports"]["modules"]), len(report["imports"]["unparsed"])),
         "输入完整性: declared=%s (%d 错误) / imports=%s (%d 未解析) / environment=%s (pip exit=%s, %d 元数据错误)"
         % (
             _flag(inputs["declared"]["ok"]), len(inputs["declared"]["errors"]),
@@ -229,7 +238,10 @@ def _lines(report: dict) -> list[str]:
             len(inputs["environment"]["metadata_errors"]),
         ),
         "约束: %d 个依赖名，其中 %d 个有无法判定的约束"
-        % (len(report["constraints"]), len([row for row in report["constraints"] if row.get("unjudged")])),
+        % (
+            len(report["constraints"]),
+            len([row for row in report["constraints"] if row.get("unjudged")]),
+        ),
         "差异: missing %d / unexpected %d / unused %d / mismatch %d → matrix=%s"
         % (
             len(matrix.get("missing") or []),
@@ -241,13 +253,18 @@ def _lines(report: dict) -> list[str]:
         "判定: %s（exit=%s）%s"
         % (
             report["verdict"], report["exit"],
-            "" if not report["ingest_incomplete"] else "；不完整输入: " + ", ".join(report["ingest_incomplete"]),
+            ""
+            if not report["ingest_incomplete"]
+            else "；不完整输入: " + ", ".join(report["ingest_incomplete"]),
         ),
     ]
     for item in (matrix.get("missing") or [])[:10]:
         lines.append("  缺: %s %s" % (item.get("name"), item.get("specifier") or ""))
     for item in (matrix.get("version_mismatch") or [])[:10]:
-        lines.append("  不符: %s 声明 %s 实装 %s" % (item.get("name"), item.get("declared"), item.get("installed")))
+        lines.append(
+            "  不符: %s 声明 %s 实装 %s"
+            % (item.get("name"), item.get("declared"), item.get("installed"))
+        )
     for item in (matrix.get("unused_declared") or [])[:10]:
         lines.append("  未用: %s（%s）" % (item.get("name"), item.get("group", "unknown")))
     for row in report["constraints"]:
