@@ -36,6 +36,12 @@ MAX_GROUPS = 5
 #: Rule text longer than this is refused instead of silently truncated.
 MAX_MATCH = 64
 
+#: How a rule text is compared with a tag.  "equals" is the default because
+#: containment produces false positives that end up as wrong group names:
+#: a rule for "cat" would otherwise claim an artist whose tag is
+#: "concatenate".  Authors who really want substring matching ask for it.
+MATCH_KINDS = ("equals", "contains")
+
 #: Why a classification came out the way it did.  Closed on purpose.
 REASONS = (
     "evidence_missing",
@@ -63,12 +69,15 @@ class Rule:
     match: str
     suggest_groups: tuple[str, ...]
     weight: int = 1
+    match_kind: str = "equals"
 
     def __post_init__(self) -> None:
         rule_id = text(self.rule_id, 64)
         if self.dimension not in DIMENSIONS:
             raise RuleError("rule_dimension_invalid", rule_id)
         match = text(self.match, MAX_MATCH)
+        if self.match_kind not in MATCH_KINDS:
+            raise RuleError("rule_match_kind_invalid", rule_id)
         try:
             suggested = tuple(group_names(list(self.suggest_groups)))
         except OrganizerError as error:
@@ -88,6 +97,7 @@ class Rule:
             "match": self.match,
             "suggest_groups": list(self.suggest_groups),
             "weight": self.weight,
+            "match_kind": self.match_kind,
         }
 
 
@@ -142,7 +152,10 @@ def _tags(evidence: object) -> list[str]:
 
 
 def _matched(rule: Rule, folded: list[tuple[str, str]]) -> list[str]:
+    """Casefolded comparison only: no regex, no fuzzy match, no prefix match."""
     needle = rule.match.casefold()
+    if rule.match_kind == "equals":
+        return [original for folded_tag, original in folded if folded_tag == needle]
     return [original for folded_tag, original in folded if needle in folded_tag]
 
 
@@ -173,6 +186,7 @@ def classify(evidence: object, ruleset: RuleSet) -> dict:
                 "rule_id": rule.rule_id,
                 "dimension": rule.dimension,
                 "match": rule.match,
+                "match_kind": rule.match_kind,
                 "tags": sorted(hits),
                 "weight": rule.weight,
             }

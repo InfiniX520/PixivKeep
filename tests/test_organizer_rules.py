@@ -40,7 +40,14 @@ def test_a_single_strong_hit_is_enough_to_recommend_a_group():
     assert result["needs_more"] is False
     assert result["reasons"] == []
     assert result["anchors"] == [
-        {"rule_id": "r-topic", "dimension": "topic", "match": "cat", "tags": ["cat"], "weight": 2}
+        {
+            "rule_id": "r-topic",
+            "dimension": "topic",
+            "match": "cat",
+            "match_kind": "equals",
+            "tags": ["cat"],
+            "weight": 2,
+        }
     ]
 
 
@@ -67,12 +74,23 @@ def test_missing_or_empty_evidence_is_unknown_not_no_match(evidence):
     assert result["reasons"] == ["evidence_missing"]
 
 
-def test_matching_is_casefolded_containment_not_equality():
+def test_equals_is_the_default_and_it_is_only_casefolded():
     assert classify({"tags": ["CAT"]}, base())["groups"] == ["animal"]
-    assert classify({"tags": ["concatenate"]}, base())["groups"] == ["animal"]
-    assert classify({"tags": ["猫咪"]}, ruleset(Rule("r", "topic", "猫", ("cats",), 2)))[
-        "groups"
-    ] == ["cats"]
+    assert classify({"tags": ["concatenate"]}, base())["groups"] == []
+
+
+def test_contains_has_to_be_asked_for_by_the_rule_author():
+    loose = ruleset(Rule("r", "topic", "cat", ("animal",), 2, match_kind="contains"))
+    assert classify({"tags": ["concatenate"]}, loose)["groups"] == ["animal"]
+    assert classify({"tags": ["CAT"]}, loose)["groups"] == ["animal"]
+
+
+def test_cjk_containment_also_needs_the_explicit_kind():
+    strict = ruleset(Rule("r", "topic", "猫", ("cats",), 2))
+    assert classify({"tags": ["猫"]}, strict)["groups"] == ["cats"]
+    assert classify({"tags": ["猫咪"]}, strict)["groups"] == []
+    loose = ruleset(Rule("r", "topic", "猫", ("cats",), 2, match_kind="contains"))
+    assert classify({"tags": ["猫咪"]}, loose)["groups"] == ["cats"]
 
 
 def test_the_rule_text_is_literal_and_never_a_pattern():
@@ -133,9 +151,18 @@ def test_the_version_is_part_of_the_identity_and_rule_order_is_not():
     a = ruleset(first, second)
     b = ruleset(second, first)
     c = ruleset(first, second, version="v2")
+    loose = ruleset(Rule("r-1", "topic", "cat", ("animal",), 1, match_kind="contains"), second)
     assert ruleset_fingerprint(a) == ruleset_fingerprint(b)
     assert ruleset_fingerprint(a) != ruleset_fingerprint(c)
+    assert ruleset_fingerprint(a) != ruleset_fingerprint(loose)
     assert len(ruleset_fingerprint(a)) == 64
+
+
+def test_an_unknown_match_kind_is_refused_with_the_rule_named():
+    with pytest.raises(RuleError) as caught:
+        Rule("r-kind", "topic", "cat", ("animal",), 1, match_kind="prefix")
+    assert caught.value.code == "rule_match_kind_invalid"
+    assert caught.value.rule_id == "r-kind"
 
 
 def test_classification_is_deterministic_and_does_not_touch_its_input():
@@ -180,6 +207,25 @@ def test_the_truth_table(evidence, groups, confidence, needs_more):
     assert result["groups"] == groups
     assert result["confidence"] == confidence
     assert result["needs_more"] is needs_more
+
+
+# The same evidence under the two match kinds: the whole point of the default.
+MATCH_KIND_TABLE = [
+    ("equals", {"tags": ["concatenate"]}, []),
+    ("equals", {"tags": ["cat"]}, ["animal"]),
+    ("contains", {"tags": ["concatenate"]}, ["animal"]),
+    ("contains", {"tags": ["cat"]}, ["animal"]),
+    ("equals", {"tags": ["猫咪"]}, []),
+    ("contains", {"tags": ["猫咪"]}, ["cats"]),
+]
+
+
+@pytest.mark.parametrize("kind,evidence,groups", MATCH_KIND_TABLE)
+def test_the_truth_table_for_match_kinds(kind, evidence, groups):
+    text = "猫" if "猫咪" in evidence.get("tags", []) else "cat"
+    name = ("cats",) if text == "猫" else ("animal",)
+    rule = Rule("r-kind", "topic", text, name, 2, match_kind=kind)
+    assert classify(evidence, ruleset(rule))["groups"] == groups
 
 
 def test_the_module_reads_nothing_and_calls_no_model():
