@@ -71,6 +71,22 @@ B5 tests/filter_fixtures.py + tests/test_filter_fixtures.py
    AST 断言不 import core（不依赖并行开发中的 B1-B4）。
 ```
 
+## 1.1 合流时对齐的口径（2026-11-14，修订记录；上面的契约原文保留不改）
+
+五路完成后主线程合并并跑跨路矩阵（`tests/test_filter_matrix.py`），改了两处：
+
+1. **B3 的桶归属改成"新判定决定桶"**。契约原文写的是"旧或新任一 unknown → uncovered"，实测在**放宽**方向上会把
+   "旧 unknown、新 match"的候选埋进 uncovered：那正是最该被重新纳入的一类（当时因元数据未知没下载，现在条件明确通过）。
+   新规则：`new=match` → 旧 match 进 kept、否则进 newly_included；`new=exclude` → 旧 match 进 newly_excluded、否则进 still_excluded；
+   `new=unknown` → uncovered。于是 `uncovered` 恰为「新条件下仍判不了」，五桶之和恒等于候选数。
+2. **两份原因码表必须逐字相同**。B1 与 B2 各自持有一份 `LEGACY_CODE_MAP` 与闭集（为了五路可并发、互不 import），
+   矩阵断言两份表相等、旧码八项齐全、目标码与字段都在闭集内，并断言 `verdict_of(B2 的 reasons) == B2 的 verdict`。
+   这条断言是"两处副本"唯一的护栏，删掉它等于允许两边悄悄漂移。
+
+另外记录三条实现选择（契约没写死的地方）：B1 拒绝 float 作为 evidence（只接受 str/int/bool/None）；
+B2 对非 bool 非 None 的 `available` 抛 `invalid_candidate`（那是调用方 bug，不当"未知"放过）；
+B4 的 `from_dict` 统一抛 `ContractError`（`ValueError` 子类），未知字段一律拒绝。
+
 ## 2. 主线程合流后做
 
 - `tests/test_filter_matrix.py`：把 B5 的九类夹具喂给 B2，逐条断言 verdict 与 code；断言 B2 发出的码与字段都在 B1 的闭集内；B3 五桶穷尽；B4 快照不可变。
