@@ -2256,16 +2256,16 @@
           "passed": 12
         },
         "suite": {
-          "tests": 2287,
-          "passed": 2283,
+          "tests": 2295,
+          "passed": 2291,
           "skipped": 4,
           "failures": 0,
           "errors": 0,
-          "seconds": 626.963
+          "seconds": 665.933
         },
         "whole_suite": {
-          "tests": 2321,
-          "passed": 2317,
+          "tests": 2329,
+          "passed": 2325,
           "skipped": 4,
           "failures": 0,
           "errors": 0
@@ -2294,7 +2294,12 @@
       "product_source_changed": true,
       "business_data_changed": false,
       "deployed": false,
-      "merged_to_main": false
+      "merged_to_main": false,
+      "read_only_audit": {
+        "p1": 0,
+        "p2_fixed": 2,
+        "p3_fixed": 8
+      }
     }
   ]
 }

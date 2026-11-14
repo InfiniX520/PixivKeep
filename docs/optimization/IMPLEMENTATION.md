@@ -228,17 +228,17 @@ MISSING 短缓存只允许调度/hold，不变成健康证据；不盲目重复�
 仍列明：Tk 拆除稳定性未闭环（本轮只攒数据，基线同样间歇失败）、真实库恢复与真实归档 `apply()` 未演练、跨卷身份未实测、旧采集器仍在 `.runtime` 但不应再用。详见[维护记录](../maintenance/2026-11-14_jpgpng_post_tidy_closure_r2.md)。
 
 未合并 main、未部署；日常目录仍为 `4ba891e`。
-## 5. 接续记录规则
 
-机器当前入口：[TASK_PLAN.json](../../TASK_PLAN.json) 的 `current_plan.active_workstream` 和 `current_plan.unified_implementation`；追加历史：[LOG.json](../../LOG.json)；维护记录：[本批实施说明](../../../docs/maintenance/2026-11-11_jpgpng_unified_implementation.md)。归档专项阶段继续在[归档实施日志](../archiving/IMPLEMENTATION_LOG.md)记细节，并链接回本页。
-
-每批说明实际范围、代码差异、验证、失败、未完成边界、下一任务和用户配合时机。不用一个总百分比掩盖未完成分支，不把设计、离线通过、真实小样通过和已发布混写。完成的报告与基线不可覆盖。
-
-
-## 4O. 当前：JPGPNG-POST-TIDY-CLOSURE-AUDIT-20261114-01
+## 4P. 复审（历史）：JPGPNG-POST-TIDY-CLOSURE-AUDIT-20261114-01
 
 独立固定 `9ee6206`，对比 `5f19553`。第 4N 节是修复方当时的记录，保留原文；其中未填占位值的实际独立复跑结果为主体 2,229（2,225 通过/4 跳过）、view 25/25、presentation 逐条 9/9，总计 2,263（2,259 通过/4 跳过）。旧原件两处夹具/注入点适配有合理依据，不算新回归。
 
 新增 14 项反例 12 红/2 绿，归为 1 P1 + 5 P2：CL-01 清理越权/穿越 junction；WR-04 失败生命周期/typed 协议；CL-02 restore-check 对不可用库成功；CL-03 未证明扫描前缀；WR-06 刷新接受旧响应；PA-03 路径身份未知仍判 ok。另承接 Tk 根因未关闭。不能采纳第 4N 维护记录中的“可替换日常入口”。
 
 下一轮按 [S0–S5 指导](../audits/2026-11-14-post-tidy-closure/DEVELOPMENT_GUIDE.md)冻结所有权与错误协议，维护文件由单一 owner 串行修，scan/UI/归档工具按独立文件分工。3 个 dirty scratch 原位保留，历史审计/归档证据不改。本轮只更新审计、合成反例和导航，日常目录仍 `4ba891e`。
+
+## 5. 接续记录规则
+
+机器当前入口：[TASK_PLAN.json](../../TASK_PLAN.json) 的 `current_plan.active_workstream` 和 `current_plan.unified_implementation`；追加历史：[LOG.json](../../LOG.json)；维护记录：[本批实施说明](../../../docs/maintenance/2026-11-11_jpgpng_unified_implementation.md)。归档专项阶段继续在[归档实施日志](../archiving/IMPLEMENTATION_LOG.md)记细节，并链接回本页。
+
+每批说明实际范围、代码差异、验证、失败、未完成边界、下一任务和用户配合时机。不用一个总百分比掩盖未完成分支，不把设计、离线通过、真实小样通过和已发布混写。完成的报告与基线不可覆盖。

@@ -20,11 +20,11 @@
 
 ## 当前进度与计划
 
-- [优化、功能与归档联合实施：当前总入口](optimization/IMPLEMENTATION.md)：RFB-01..06（第 4K 节）、W5/W6 交付（第 4L 节）与 W5/W6 证明修复（第 4M 节，WC-01..06）属于历史关闭记录；最新 PA/WR 关闭程度与 CL-01..03 以页首独立审计为准，旧编号不重复计算。
+- [优化、功能与归档联合实施：当前总入口](optimization/IMPLEMENTATION.md)：RFB-01..06（第 4K 节）、W5/W6 交付（第 4L 节）、W5/W6 证明修复（第 4M 节）、post-tidy 关闭（第 4N 节）与复审关闭（第 4O 节）按顺序读；第 4P 节是复审方的独立记录。旧编号不重复计算。
 - [W5/W6 审计与逐项发现](audits/2026-11-14-u1a-w5-w6/README.md)：1 P1 + 4 P2 + 1 P3，12 条独立反例（9 红 3 绿）与修复后的 12/12。
 - [W5/W6 证明与作用域契约 v5](optimization/2026-11-14/U1A_W5_W6_CONTRACT_V5.md)：五类备份事实、逻辑指纹算法、退出码、epoch 作用域与 A1..A8 修订。
 - [U1-A W5/W6 范围与冻结接口](optimization/2026-11-14/U1A_W5_W6_SCOPE.md)：四个工作包、文件归属、接口契约与"不做"清单。
-- [切换与回退 runbook](optimization/2026-11-14/U1A_SWITCH_RUNBOOK.md)：历史操作说明；WR-01 未关闭前禁止按其中命令恢复真实库，先看最新独立审计。
+- [切换与回退 runbook](optimization/2026-11-14/U1A_SWITCH_RUNBOOK.md)：协议说明。真实库恢复仍未执行过，任何恢复都要用户明确指令并另批；恢复门槛是 `maintain.cmd verify <备份目录>`，`compare` 不是门槛。
 - [前置接受事务复审与开发指导](audits/2026-11-13-a1-acceptance/README.md)：AR4、修复复核、R0–R6 和版本证据。
 - [U1-A/J-01 生产接线评审](audits/2026-11-13-u1a-wiring/README.md)：复用收据不等于当前磁盘健康；7 项独立红测试与 W0–W6。
 - [上一轮后续实现审计](audits/2026-11-12-a1-final/README.md)：历史 AR3、N0–N6 与原始证据，不能当新树结果。

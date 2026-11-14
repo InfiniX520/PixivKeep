@@ -361,7 +361,7 @@
       "latest_overview": "docs/audits/2026-11-14-post-tidy-closure/README.md",
       "latest_evidence": "docs/maintenance/2026-11-14_jpgpng_post_tidy_closure_r2.md",
       "audited_commit": "9ee62068273324848a83061662d86ce9da46876c",
-      "fixed_commit": "61264d0eac32060233ee02286e7c9b499cea96d1",
+      "fixed_commit": "f09d88f",
       "runtime_checkout_note": "Daily branch remains daily/u1a-w5-w6-20261114 at 4ba891e until the user switches. This round changed product code on fix/a1-post-tidy-r2-20261114 only: no deployment, no database restore, real library read-only. Restore gate is maintain.cmd verify <backup dir>; compare is not a gate."
     },
     "archiving_design": {
@@ -1440,7 +1440,7 @@
         "reaudit_counterexamples": {
           "tests": 14,
           "passed": 14,
-          "seconds": 3.497,
+          "seconds": 2.826,
           "before": "12 failed / 2 passed"
         },
         "previous_boundaries": {
@@ -1452,16 +1452,17 @@
           "passed": 12
         },
         "suite": {
-          "tests": 2287,
-          "passed": 2283,
+          "tests": 2295,
+          "passed": 2291,
           "skipped": 4,
           "failures": 0,
           "errors": 0,
-          "seconds": 626.963
+          "seconds": 665.933
         },
         "tk_view": {
           "tests": 25,
-          "passed": 25
+          "passed": 25,
+          "seconds": 23.585
         },
         "tk_display": {
           "tests": 9,
@@ -1469,12 +1470,12 @@
           "method": "one module per process"
         },
         "archive_tool": {
-          "tests": 21,
-          "passed": 21
+          "tests": 23,
+          "passed": 23
         },
         "whole_suite": {
-          "tests": 2321,
-          "passed": 2317,
+          "tests": 2329,
+          "passed": 2325,
           "skipped": 4,
           "failures": 0,
           "errors": 0
@@ -1494,7 +1495,12 @@
         "old collector still on disk with old behaviour; only tools/maintenance may be used"
       ],
       "deployed": false,
-      "merged_to_main": false
+      "merged_to_main": false,
+      "read_only_audit": {
+        "p1": 0,
+        "p2_fixed": 2,
+        "p3_fixed": 8
+      }
     }
   }
 }

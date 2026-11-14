@@ -32,9 +32,9 @@
 | 复审 14 条（`tests/test_u1a_closure_boundaries.py`） | **14/14 全绿**（3.50 s，0 跳过——采集器已进仓库） |
 | 上一轮 10 条边界 | **10/10** |
 | 上一轮 WC 12 条 | **12/12** |
-| 主体全量（排除 3 个 Tk 模块） | **2,287 项：2,283 通过、4 跳过、0 失败、0 错误**，626.96 s |
-| `test_collection_view.py` / 两个 presentation 模块 | **25/25**（15.93 s）/ `test_collection_presentation` **4/4**（1.86 s）/ `test_source_presentation` **5/5**（2.08 s） |
-整套合计：**2,287（主体）+ 25 + 4 + 5 = 2,321 项**，2,317 通过、4 跳过、0 失败、0 错误；与复审口径的 2,263 相比净增 58（本轮新增：生命周期 25、scan walk 11、面板 9、其余为 S1 邻接用例）。
+| 主体全量（排除 3 个 Tk 模块） | **2,295 项：2,291 通过、4 跳过、0 失败、0 错误**，665.93 s |
+| `test_collection_view.py` / 两个 presentation 模块 | **25/25**（23.59 s）/ `test_collection_presentation` **4/4**（2.98 s）/ `test_source_presentation` **5/5**（3.37 s）。**这三个数是单次观测**：同配置同进程下 §8 记录过 10 次里 2 次失败，因此它们只证明“这一次跑通了”，不证明持续稳定 |
+整套合计：**2,295（主体）+ 25 + 4 + 5 = 2,329 项**，2,325 通过、4 跳过、0 失败、0 错误；与复审口径的 2,263 相比净增 66（复审 14 条进入主体 14、生命周期 29、scan walk 11、面板 12；14+29+11+12=66 与套件差一致）。
 
 ## 4. 真实库与真实备份（只读）
 
@@ -56,7 +56,25 @@
 2. **`content` 三值**：AMD2 初稿把 `content` 写成 `ok|unknown`，实现按规则 5 需要 `changed`；已在 AMD2 内补成 `ok|unknown|changed` 并注明是本次修订内的口径补全。
 3. **`_discard` 名字保留**：旧枚举式实现已彻底消失，但函数名保留为两行委托，因为复审用例用 `monkeypatch.setattr(m, "_discard", …)` 注入清理失败——改名会连带改审计证据，属于不允许的改动。
 
-## 6. 明确未做与风险
+## 6. 只读复审（第二轮）与处理
+
+对照 AMD2 逐文件审 `9ee6206..e5ab12d` 的只读复审结论：**P1 = 0**，方向成立；但抓到 **2 项 P2**（都在本轮主题上）与 8 项 P3，逐条处理如下。
+
+| 编号 | 内容 | 处理 |
+| --- | --- | --- |
+| P2-1 | verify 的 adopt 竞态：`TemporaryWorkspace.adopt` 抛 `WorkspaceError`（RuntimeError），内层只 `except OSError`，逃到外层 `finally` 时 `ws` 未绑定 → `UnboundLocalError` 覆盖原始异常，`--json` 打出 traceback | 已修：`ws` 先置 None、内层捕 `(OSError, WorkspaceError)`、finally 守门；无法描述身份的目录写进 `evidence.left_behind` 并加 warning `verify_workspace_unowned`，`exit_code=3` 且 `status` 为 `error`。独立探针复现 → 修复后 exit 3、`ok=false`、无 traceback |
+| P2-2 | 半途失败的副本文件在 `_copy_and_hash` 返回后才登记，失败时被当“陌生项”永久保留，错误也不提残留 | 已修：`claim()` 用 O_EXCL 创建并 `fstat` 记录、`release()` 撤掉从未写入的空成员；`_copy_and_hash` **签名不变**（复审原件的注入点），改为打开已存在文件写入；清理以 (dev, ino) 为删除凭据，inode 相同但 size/mtime 变化按“半成品”删除并在 `incomplete` 里列出 |
+| P3-1 | `IMPLEMENTATION.md` 有两个 `## 4O` | 已修：审计节移到 §5 前改名 **4P**，顺序为 4N→4O→4P→§5 |
+| P3-2 | 记录里“生命周期 25”实为 24 | 已修（14+24+11+9=58 与套件差一致） |
+| P3-3 | Tk 的 4/4、5/5 被当成稳定结果 | 已修：标注为**单次观测**，并指向 §8 的 10 次样本 |
+| P3-4 | AMD2 的 restore-check 表把 `missing` 排在 WAL 之前，与实现相反 | 已修：表按实现真实顺序重排（WAL 不可读在最前） |
+| P3-5 | `_safe_cleanup` 的 `except BaseException` 吞掉清理期间的 Ctrl-C | 已修：只捕 `Exception`；取舍写明——清理期间的中断按原类型上抛并覆盖主错误，因为操作者已要求停止 |
+| P3-6 | 归档工具在“句柄 unknown + 路径已知冲突”时把冲突遮成 unknown | 已修：**可测量的冲突优先于 unknown**（`path_binding=changed`、`identity=changed`）；无可比较的一对时仍是 unknown；README 与 docstring 同步 |
+| P3-7 | 页读失败没清 `_verify_read_revision` | 已修：新代次与两种失败各自清空对应版本号，补 3 条回归（含“真报警仍要报”的反向断言） |
+| P3-8 | 同一句注释重复两行 | 已修 |
+
+复审自己跑的数字：251 项全绿（closure 14、lifecycle 24、backup 26、restore 6、walk 52、panel 86、post-tidy 10、w5w6 12、tools 21），并独立核过真实备份 `verify` 与库 `sha256`。
+## 7. 明确未做与风险
 
 - **Tk 拆除稳定性（既有 P2）未闭环**：本轮只攒了数据（见 §7），没有根因结论。
 - **真实库恢复未执行**；`tools/maintenance` 的 `apply()` 只在合成批次跑通，真实批次未演练；跨卷身份变化未实测。
@@ -67,7 +85,7 @@
 - Windows 上 mount point 也被当重解析点保留（安全侧，不自动清理）。
 - 清单摘要不是签名；`verify` 的隔离副本是显式代价。
 
-## 7. Tk 稳定性数据（不结论）
+## 8. Tk 稳定性数据（不结论）
 
 | 实验 | 结果 |
 | --- | --- |
@@ -77,6 +95,6 @@
 
 结论只到"间歇性、与本轮改动无关、触发条件不是根的数量"；根因仍待专项诊断（下一轮 S5）。
 
-## 8. 回退
+## 9. 回退
 
 `git checkout fix/a1-post-tidy-closure-20261114`（上一轮候选 `9ee6206`），或退到标签 `checkpoint-2026-11-14-post-tidy-closure`。日常目录本轮不动，仍为 `4ba891e`。

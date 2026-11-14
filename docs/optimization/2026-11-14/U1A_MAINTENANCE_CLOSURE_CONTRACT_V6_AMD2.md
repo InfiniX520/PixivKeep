@@ -32,6 +32,9 @@ ws.discard() -> {"state": ok|partial|kept|failed, "removed": [...], "kept": [{"n
 - **任何重解析点都不进入、不删除**：`st_file_attributes & FILE_ATTRIBUTE_REPARSE_POINT`（Windows）、`stat.S_ISLNK`、`is_junction()` 任一为真即保留，`reason="reparse"`。不使用 `resolve()` 后再判断"目标在根内"这种一次检查。
 - 只删本操作登记过的普通文件与（空）子目录；**不递归删除未登记目录**。
 - 删除该目录本身前必须确认它已空且身份未变；否则保留并报告。`state` 与 `removed/kept` 必须自洽：`kept` 非空时不得是 `ok`。
+- **身份不可证即不可删**：`st_dev` 或 `st_ino` 任一为 0（某些网络卷/文件系统不报告 inode）时，该成员一律保留并记 `reason="identity_unavailable"`；目录身份不可证时一个成员都不动。
+- **“半成品可删”的前提是对象已可证**：inode 相同、只有 size/mtime 变化时才按半成品删除（并在报告 `incomplete` 里列出）；inode 不可证时半成品也保留——宁可留残留，不删不确定的东西。不得用“size/mtime 完全一致就删”兜底。
+- 成员在**创建那一刻**登记（`claim()` 用 O_EXCL 创建并 `fstat` 记录），不是复制成功之后；复制失败留下的半成品因此仍属本操作，清理能删或至少如实报告。
 - 任何 `OSError` → 记入 `errors`，`state="partial"` 或 `failed`；**绝不向上抛成主错误**。
 
 ### 1.3 调用点（三个都必须换）
@@ -75,12 +78,12 @@ ws.discard() -> {"state": ok|partial|kept|failed, "removed": [...], "kept": [{"n
 
 先有表，再有代码。`status` 来自 `inspect_library`。
 
-| 条件（按顺序） | state | 退出码 |
+| 条件（按顺序，**实现里的真实顺序**） | state | 退出码 |
 | --- | --- | --- |
+| WAL `stat` 失败（有路径但读不到） | `wal_unreadable` | 2 |
 | inspect 抛错 / 读不到 | `unobservable` | 3 |
 | `status == "missing"` | `library_missing` | 2 |
 | `status in {"unreadable","empty","incompatible","not_a_sqlite_file"}` | `not_usable` | 2 |
-| WAL `stat` 失败（有路径但读不到） | `wal_unreadable` | 2 |
 | `status == "compatible"` 且非 WAL 模式且 WAL 非空 | `orphan_wal` | 2 |
 | 其余（compatible + 组一致） | `ok` | 0 |
 
