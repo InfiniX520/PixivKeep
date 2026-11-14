@@ -12,12 +12,17 @@ The rules, in one place
 -----------------------
 * Five buckets, exhaustive and mutually exclusive, keyed by `illust_id`:
   `kept` (matched before and now), `newly_excluded` (matched, now excluded),
-  `newly_included` (excluded, now matches), `still_excluded` (excluded before
-  and now) and `uncovered` (either side said "unknown").
-* "Unknown" is not a synonym for "excluded" or for "matched": a candidate whose
-  verdict is unknown on either side goes to `uncovered`, together with the
-  reasons from both sides.  Losing that distinction is how an unverified
-  candidate silently becomes a green one.
+  `newly_included` (not matched before, matches now), `still_excluded` (not
+  matched before and still not) and `uncovered` (still unknown **now**).
+* **The new verdict decides.**  The old verdict only refines the bucket.  An
+  artwork whose metadata was unknown under the old conditions and that matches
+  under the new ones is the textbook "widen and re-admit" case: it belongs in
+  `newly_included`, not in `uncovered`.  Filing it under `uncovered` would make
+  the widening silently fail for exactly the candidates it was meant to rescue.
+* `uncovered` therefore means one thing only: this candidate cannot be judged
+  **under the new conditions**.  Its keys are exactly the candidates whose new
+  verdict is "unknown", and their reasons (both sides, de-duplicated) go to
+  `uncovered_reasons`.
 * Widening and narrowing are the same walk in opposite directions; there is no
   branch that removes, moves or rewrites anything.
 * A duplicated `illust_id` is refused instead of silently collapsed: the
@@ -38,12 +43,16 @@ VERDICTS = ("match", "exclude", "unknown")
 #: The five buckets, in display order.
 BUCKETS = ("kept", "newly_excluded", "newly_included", "still_excluded", "uncovered")
 
-#: What one side-to-side transition is called.
+#: (new verdict, old verdict) -> bucket.  The new side leads: a candidate that
+#: matches now is admitted whatever the old side could not decide, and one that
+#: still fits the filter stays excluded for the same reason.
 TRANSITIONS = {
     ("match", "match"): "kept",
-    ("exclude", "match"): "newly_included",
-    ("match", "exclude"): "newly_excluded",
+    ("match", "exclude"): "newly_included",
+    ("match", "unknown"): "newly_included",
+    ("exclude", "match"): "newly_excluded",
     ("exclude", "exclude"): "still_excluded",
+    ("exclude", "unknown"): "still_excluded",
 }
 
 Explain = Callable[[Any, Any], Mapping[str, Any]]
@@ -143,9 +152,9 @@ def reevaluate(
         old_verdict, old_reasons = _judge(judge, candidate, old_conditions, side="old")
         new_verdict, new_reasons = _judge(judge, candidate, new_conditions, side="new")
 
-        if "unknown" in (old_verdict, new_verdict):
-            # Unknown is not a verdict about the artwork, so it cannot be filed
-            # under kept or excluded: it is exactly what "uncovered" is for.
+        if new_verdict == "unknown":
+            # Only an unresolved verdict *now* is "uncovered": the candidate
+            # still cannot be judged, whatever the old side managed to say.
             buckets["uncovered"].append(illust_id)
             merged: list[dict[str, Any]] = []
             keys: set[str] = set()
@@ -157,7 +166,7 @@ def reevaluate(
             uncovered_reasons[illust_id] = merged
             continue
 
-        bucket = TRANSITIONS[(old_verdict, new_verdict)]
+        bucket = TRANSITIONS[(new_verdict, old_verdict)]
         buckets[bucket].append(illust_id)
 
     for name in BUCKETS:
