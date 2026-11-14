@@ -78,9 +78,11 @@
 
 | 字段 | 生产者 | 消费者 | 未知时 |
 | --- | --- | --- | --- |
-| `snapshot_id, group, artist_ids[], source{visibility, catalog_complete}` | 范围模块（读快照） | 下载任务创建 | 快照 `catalog_complete=False` → 范围标 `partial`，不许当全集 |
+| `snapshot_id, groups[(visibility, name)], artist_ids[], source{visibility, catalog_complete}` | 范围模块（读快照） | 下载任务创建 | 快照 `catalog_complete=False` → 范围标 `partial`，不许当全集 |
 | `fingerprint`（成员集合的规范摘要） | 范围模块 | 任务、续跑、审计 | — |
 | `completeness ∈ complete\|partial\|unknown` | 范围模块 | 任务创建 | 依据快照的完整性；快照没记录 → `unknown` |
+
+**组身份是 `(visibility, name)` 而不是名字**：公开关注与非公开关注是两个独立命名空间，同名不代表同一组。因此：调用方传纯名字时必须在整份快照里唯一命中一个组，跨侧同名一律 `group_ambiguous`（不猜、不合并）；显式传 `(visibility, name)` 才可取该侧成员，且 `fingerprint` 必须把 visibility 算进去（同名不同侧的两个范围指纹必须不同）。
 
 **可测形式（"按组下载范围不可变"）**：任务创建时保存 `fingerprint`；之后对同一分组再取快照，`ensure_current(scope, snapshot2)` 若成员不同必须抛 `scope_changed`，由调用方**新建**任务，而不是把旧任务的范围悄悄加宽。多组重叠时按 `artist_id` 去重，并记录每个 artist 的来源组。
 
@@ -88,7 +90,9 @@
 
 | 字段 | 生产者 | 消费者 | 未知时 |
 | --- | --- | --- | --- |
-| `artist_id, kind ∈ unchanged\|moved\|group_renamed\|group_deleted\|new_member\|unknown` | 冲突模块（两份快照比对） | 批次续跑、报告 | 无法判定 → `unknown`，一律不写 |
+| `artist_id, kind ∈ unchanged\|moved\|group_renamed\|group_deleted\|new_member\|artist_gone\|unknown` | 冲突模块（两份快照比对） | 批次续跑、报告 | 无法判定 → `unknown`，一律不写 |
+
+> `artist_gone` 与 `unknown` 的区别是**已知与未知**的区别，不能合并：快照完整、名单读得到、画师确实不在关注列表里 → `artist_gone`（已知事实，动作 `needs_human`，绝不自动删计划条目）；快照不完整、名册分区读不出、坏行 → `unknown`（判断不了）。把已知说成未知，与"读坏了当空组"是同一类错误。
 | `evidence{before[], after[], observed_at}` | 同上 | 人工复核 | 缺任一侧 → `unknown` |
 | `action ∈ keep\|replan\|needs_human` | 决策表 | 批次（决定跳过谁） | 默认 `needs_human` |
 
