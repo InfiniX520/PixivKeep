@@ -709,10 +709,9 @@ def restore_check(path: str | Path) -> dict[str, object]:
     wal_mode = header == (2, 2)
     status = str(report["status"])
     reasons: list[str] = []
-    if not wal_readable:
-        state = "wal_unreadable"
-        reasons.append("wal_unreadable")
-    elif status == "missing":
+    # A -wal that could not be read returned above; reaching this point means
+    # the log was measurable, so what is left is a question about the database.
+    if status == "missing":
         state = "library_missing"
         reasons.append("library_missing")
     elif status in {"unreadable", "empty", "incompatible", "not_a_sqlite_file"}:
@@ -2045,7 +2044,7 @@ def verify_backup(
     )
     evidence["seconds"] = round(time.perf_counter() - started, 6)
     evidence["checked_at"] = _now_utc()
-    return {
+    report = {
         "mode": "manifest",
         "question": "sealed_backup",
         "backup": str(root),
@@ -2067,11 +2066,15 @@ def verify_backup(
         # exit_code 3 means 'nothing was compared'.  The report keeps its facts
         # and also carries the error marker the other commands use, so a reader
         # does not mistake an unobserved backup for a disagreement about content.
-        "status": "error" if _verify_exit_code(bool(ok), reasons) == 3 else None,
         "reasons": sorted(set(reasons)),
         "warnings": sorted(set(warnings)),
         "checked_at": _now_utc(),
     }
+    if report["exit_code"] == 3:
+        # Only an unobserved backup carries the error marker; a clean run must
+        # not look like an error to a reader that keys on the presence of status.
+        report["status"] = "error"
+    return report
 
 
 def compare_library(

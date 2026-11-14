@@ -123,7 +123,7 @@ class TemporaryWorkspace:
         successful run: it is still the object this run created (same key), so
         removing it here is within the same ownership claim.
         """
-        member = self._members.pop(name, None)
+        member = self._members.get(name)
         if member is None:
             return
         target = self.path / name
@@ -136,7 +136,11 @@ class TemporaryWorkspace:
         try:
             os.unlink(target)
         except OSError:
-            pass
+            # The file is still there, so its ownership record must stay: a later
+            # discard() has to keep reporting it as our half-written member
+            # instead of relabelling it as a stranger.
+            return
+        self._members.pop(name, None)
 
 
     def claim(self, name: str, *, kind: str = "file") -> Path:
