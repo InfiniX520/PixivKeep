@@ -8,6 +8,7 @@ from collections import OrderedDict
 from datetime import datetime
 
 from core.collection_scope import scope_fingerprint
+from core.filter_reasons import translate
 from core.collection_settings import CollectionSettings, SettingsError
 from core.library_queries import LibraryQuery
 from core.log_view import LogView, ViewDelta
@@ -18,6 +19,59 @@ from gui.verification_panel import describe_result, reason_text, row_key, summar
 _PHASE = {'queued':'等待开始','running':'收集中','cooling':'等待冷却','pausing':'正在暂停',
     'cancelling':'正在取消','settling':'正在收尾','paused':'已暂停','blocked':'需要处理',
     'partial':'部分完成','completed':'已完成','cancelled':'已取消'}
+# The shared reason vocabulary (core/filter_reasons).  A code this table does
+# not know is reported as unknown instead of being dropped: 'we do not know
+# why' and 'we excluded it' are different answers, and only one is true.
+_FILTER_REASON_WORDS = {
+    'favorites_below': '收藏数低于设定',
+    'ai_excluded': '命中 AI 排除',
+    'type_unsupported': '作品类型不支持',
+    'field_unknown': '字段未知，未判定',
+    'access_denied': '作品不可访问',
+}
+
+
+# Bounded, safe wording for a failed coverage read.  The raw exception text is
+# never shown: it can carry an absolute path, and a path is not a reason.
+_COVERAGE_ERROR_TEXT = {
+    'database_missing': '运行状态库不存在（还没有采集过关注历史，或位置不对）',
+    'database_unreadable': '运行状态库打不开（可能被占用、或不是这个版本的库）',
+    'run_unknown': '这个运行 ID 在状态库里不存在',
+    'facts_rejected': '状态库里的字段不完整，无法组成摘要',
+}
+
+
+def _coverage_error_text(error) -> str:
+    """One short, safe sentence for the panel; never the raw message."""
+    code = str(getattr(error, 'code', '') or '')
+    if code in _COVERAGE_ERROR_TEXT:
+        return _COVERAGE_ERROR_TEXT[code]
+    return code or type(error).__name__
+
+
+def _why_not_downloaded(reasons) -> str:
+    """Explain one row's stored reason codes, or say that we cannot."""
+    if not reasons:
+        return ''
+    codes = [reasons] if isinstance(reasons, str) else list(reasons)
+    lines = []
+    for code in codes:
+        text = str(code or '').strip()
+        if not text:
+            continue
+        try:
+            record = translate(text)
+        except ValueError:
+            lines.append('原因: 未知原因（%s）' % text)
+            continue
+        if record.get('unknown'):
+            lines.append('原因: 字段未知（%s），未判定' % record.get('field'))
+        else:
+            words = _FILTER_REASON_WORDS.get(str(record.get('code')), str(record.get('code')))
+            lines.append('原因: %s（%s）' % (words, record.get('field')))
+    return ('\n' + '\n'.join(lines)) if lines else ''
+
+
 _RESULT = {'completed':'已完成','partial':'部分完成','failed':'失败','pending':'待处理',
     'needs_verification':'待核验','filtered':'条件过滤','skipped_existing':'已有跳过',
     'unavailable':'作品不可用','unsupported':'暂不支持','metadata_unknown':'信息待确认','cancelled':'已取消'}
@@ -264,11 +318,15 @@ class CollectionController:
                     # A failed verification read is a panel state, not a modal:
                     # the user is looking at that page and needs to see there
                     # that nothing is listed right now.
-                    read_failed = key in {'verification_pages','verification_summary'}
+                    read_failed = key in {'verification_pages','verification_summary','coverage_summary'}
                     quiet = key not in {'overview','snapshot','artists','request','records'}
                     self._show_error(error, notify=quiet and not verify and not read_failed)
                     if verify:
                         self._verification_failed(error)
+                    elif key == 'coverage_summary':
+                        # A failed read is its own panel state: the old body is
+                        # gone and nothing on screen claims to describe a run.
+                        self.view.set_coverage_error(_coverage_error_text(error))
                     elif read_failed:
                         self._verification_read_failed(
                             error, key, scope=self._verify_requests.get(key))
@@ -705,6 +763,8 @@ class CollectionController:
             elif action=='verification_recover':self._recover_verification([payload.get('key')])
             elif action=='verification_batch':
                 self._recover_verification(list(payload.get('keys') or ()))
+            elif action=='coverage_load':
+                self._load_coverage(str(payload.get('run_id') or '').strip())
             elif action=='record_next' and self._record_next:
                 self._record_cursors.append(self._record_next); self._record_version+=1; self._query_records()
             elif action=='record_previous' and len(self._record_cursors)>1:
@@ -712,7 +772,8 @@ class CollectionController:
             elif action=='select_record':
                 self._selected_record=payload.get('id'); row=self._record_rows.get(self._selected_record,{})
                 self.view.set_detail(f"{row.get('title','')}\n作品 {row.get('illust_id','')}\n画师 {row.get('artist_name') or row.get('artist_id','')}\n"+
-                    ('已通过原图结构检查' if row.get('verification')=='structure_checked' else _RESULT.get(row.get('state'),'详情见页结果')))
+                    ('已通过原图结构检查' if row.get('verification')=='structure_checked' else _RESULT.get(row.get('state'),'详情见页结果'))+
+                    _why_not_downloaded(row.get('reason_codes')))
             elif action=='open_artwork' and self._selected_record in self._record_rows:
                 self._watch('open_artwork',self.session.open_artwork(self._record_rows[self._selected_record]['illust_id']),lambda _:None)
             elif action=='export_records':
@@ -822,6 +883,34 @@ class CollectionController:
             self._verify_last_reason = reason
         if _TONE_RANK.get(tone, 1) > _TONE_RANK.get(self._verify_worst or 'muted', 0):
             self._verify_worst = tone
+
+    def _load_coverage(self, run_id: str) -> None:
+        """Read one run's coverage summary on the query owner.
+
+        The panel asks; this method reads.  Nothing in a Tk callback opens the
+        store, hashes bytes or waits on a Future: the summary arrives through
+        _poll like every other read.
+        """
+        if self.runtime is None:
+            return
+        if not run_id:
+            self.view.set_coverage_error('需要一次关注运行的 ID')
+            return
+        self.view.set_coverage_loading()
+        self._watch('coverage_summary',
+            self.runtime.coverage_summary(run_id=run_id),
+            lambda value: self._coverage_ready(value, run_id))
+
+    def _coverage_ready(self, value, run_id: str) -> None:
+        if self._closed:
+            return
+        if isinstance(value, dict) and value.get("lines"):
+            self.view.set_coverage_result(value["lines"], run_id=value.get("run_id") or run_id)
+            return
+        if isinstance(value, dict):
+            self.view.set_coverage_result((), run_id=value.get('run_id') or run_id)
+            return
+        self.view.set_coverage_error('读取结果不是预期的形状')
 
     def _refresh_verification(self, *, reset=False):
         """Read the summary and one bounded page of held rows.
