@@ -182,7 +182,9 @@ def test_three_identical_repeats_count_three_occurrences():
 def test_repeats_that_disagree_are_refused_and_name_the_field():
     explain = scripted({"a": ("match", "match")})
     with pytest.raises(ValueError, match="different content") as caught:
-        reevaluate([Artwork("a", bookmarks=5), Artwork("a", bookmarks=500)], OLD, NEW, explain=explain)
+        reevaluate(
+            [Artwork("a", bookmarks=5), Artwork("a", bookmarks=500)], OLD, NEW, explain=explain
+        )
     message = str(caught.value)
     assert "bookmarks" in message
     assert "positions 1 and 2" in message
