@@ -126,3 +126,123 @@ def test_a_denominator_that_is_not_a_number_is_refused():
 def test_render_text_joins_the_same_lines():
     value = coverage()
     assert render_text(value) == "\n".join(render(value))
+
+
+def numbers_line(value):
+    """The line that carries the run-level counts, whatever else changed.
+
+    It is identified by how it starts rather than by a substring: the artist
+    sentence also contains 页 ("有失败页"), which made a looser match useless.
+    """
+    prefixes = ("新增", "保存", "已有", "筛选排除", "字段未知", "本轮的作品数")
+    for line in render(value):
+        if ": " in line or line.startswith(("结论", "注意", "范围内", "本轮已检查", "本轮检查了")):
+            continue
+        if "都没有来源" in line or line.startswith(prefixes):
+            return line
+    raise AssertionError("no numbers line was printed")
+
+
+def test_the_all_known_numbers_line_is_unchanged():
+    assert numbers_line(coverage()) == (
+        "新增 100 个作品、保存 173 页；已有 420 页通过完整核验；筛选排除 81 件，字段未知 3 件。"
+    )
+
+
+def test_five_unmeasured_counts_print_no_digits_at_all():
+    counts = dict(coverage()["counts"])
+    for name in ("artworks_seen", "pages_saved", "pages_already_verified", "excluded_by_filter", "unknown_fields"):
+        counts[name] = None
+    line = numbers_line(coverage(counts=counts))
+    assert line == "本轮的作品数、保存页数、排除数、未知字段数都没有来源，无法给出。"
+    assert not any(character.isdigit() for character in line)
+    assert "0" not in line
+
+
+def test_an_unmeasured_count_is_never_printed_as_zero():
+    counts = dict(coverage()["counts"])
+    for name in ("artworks_seen", "pages_already_verified", "excluded_by_filter", "unknown_fields"):
+        counts[name] = None
+    counts["pages_saved"] = 5
+    line = numbers_line(coverage(counts=counts))
+    assert "保存 5 页" in line
+    assert "新增 0" not in line
+    assert "排除 0" not in line
+    assert "已有 0" not in line
+
+
+def test_an_unknown_artist_count_changes_the_first_sentence():
+    counts = dict(coverage()["counts"])
+    counts["artists_checked"] = None
+    printed = text(coverage(counts=counts))
+    assert "本轮检查了多少位画师未知（本轮没有可用的画师计数）。" in printed
+    assert "本轮已检查 30 位画师。" not in printed
+
+
+def test_four_unknown_artist_buckets_drop_the_second_sentence():
+    counts = dict(coverage()["counts"])
+    for name in ("artists_confirmed", "artists_pending", "artists_failed_pages", "artists_coverage_unverified"):
+        counts[name] = None
+    printed = text(coverage(counts=counts))
+    assert "确认当前范围处理完" not in printed
+    assert "待继续" not in printed
+
+
+def test_one_known_bucket_still_says_what_it_knows():
+    counts = dict(coverage()["counts"])
+    for name in ("artists_confirmed", "artists_failed_pages", "artists_coverage_unverified"):
+        counts[name] = None
+    printed = text(coverage(counts=counts))
+    assert "5 位待继续。" in printed
+
+
+def test_duplicate_pages_is_mentioned_only_when_it_is_a_real_number():
+    counts = dict(coverage()["counts"])
+    counts["duplicate_pages"] = 4
+    assert "其中重复分页 4 件（未重复保存）" in numbers_line(coverage(counts=counts))
+    counts["duplicate_pages"] = 0
+    assert "重复分页" not in numbers_line(coverage(counts=counts))
+    counts["duplicate_pages"] = None
+    assert "重复分页" not in numbers_line(coverage(counts=counts))
+
+
+def test_an_empty_numbers_sentence_ignores_duplicates_too():
+    counts = dict(coverage()["counts"])
+    for name in ("artworks_seen", "pages_saved", "pages_already_verified", "excluded_by_filter", "unknown_fields"):
+        counts[name] = None
+    counts["duplicate_pages"] = 3
+    line = numbers_line(coverage(counts=counts))
+    assert "重复分页" not in line
+    assert not any(character.isdigit() for character in line)
+
+
+def test_sample_marking_needs_a_number_to_belong_to():
+    counts = dict(coverage()["counts"])
+    for name in ("artworks_seen", "pages_saved", "pages_already_verified", "excluded_by_filter", "unknown_fields"):
+        counts[name] = None
+    assert "（示例）" not in numbers_line(coverage(counts=counts, sample=True))
+    assert "（示例）" in numbers_line(coverage(sample=True))
+
+
+def test_a_bool_is_not_a_count():
+    counts = dict(coverage()["counts"])
+    counts["pages_saved"] = True
+    with pytest.raises(ValueError):
+        render(coverage(counts=counts))
+
+
+def test_a_missing_count_key_is_refused():
+    counts = dict(coverage()["counts"])
+    del counts["unknown_fields"]
+    with pytest.raises(ValueError):
+        render(coverage(counts=counts))
+
+
+def test_no_none_scenario_ever_claims_the_run_finished():
+    counts = dict(coverage()["counts"])
+    for name in list(counts):
+        counts[name] = None
+    counts["duplicate_pages"] = 2
+    printed = text(coverage(counts=counts, consistent=False))
+    for word in FORBIDDEN_WHEN_INCOMPLETE:
+        assert word not in printed, word

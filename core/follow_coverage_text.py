@@ -1,19 +1,34 @@
 """Render a follow-history coverage summary without claiming what it cannot prove.
 
-The numbers come from core.follow_coverage_counts; this module only chooses
-words.  Two rules decide most of the text:
+The numbers come from core.follow_coverage_counts, where a count nobody could
+measure is None rather than 0.  This module treats the two very differently:
 
-* a denominator the caller could not prove is None, and None means the sentence
-  that needs it is not printed at all - never "共 N 件" with a guess;
-* the words 已查完 / 已穷尽 are reserved for the one case where enumeration,
-  decision and delivery are all complete and the counts add up.  Anywhere else
-  they would turn a partial run into a finished one.
+* None means the sentence that would need that number is not printed at all -
+  never "0 页", because "we did not measure it" and "it is empty" are different
+  facts and only one of them is allowed to become a digit;
+* the words 已查完 / 已穷尽 / 全部完成 are reserved for the case where
+  enumeration, decision and delivery are all complete and the counts add up.
+
+A missing key is still an error: the ten counts are the frozen contract, so
+A3 always provides all of them - it may just provide None for some.
 """
 from __future__ import annotations
 
 from typing import Any, Mapping
 
 REQUIRED = ("enumeration", "decision", "delivery", "counts", "denominators")
+COUNT_KEYS = (
+    "artists_checked",
+    "artists_confirmed",
+    "artists_pending",
+    "artists_failed_pages",
+    "artists_coverage_unverified",
+    "artworks_seen",
+    "pages_saved",
+    "pages_already_verified",
+    "excluded_by_filter",
+    "unknown_fields",
+)
 
 STATES = {
     "enumeration": {
@@ -42,6 +57,8 @@ STOP_REASONS = {
 }
 
 FORBIDDEN_WHEN_INCOMPLETE = ("已查完", "已穷尽", "全部完成")
+NO_SOURCE_SENTENCE = "本轮的作品数、保存页数、排除数、未知字段数都没有来源，无法给出。"
+UNKNOWN_ARTISTS_SENTENCE = "本轮检查了多少位画师未知（本轮没有可用的画师计数）。"
 
 
 def _state(coverage: Mapping, name: str) -> tuple[str, Any]:
@@ -54,10 +71,20 @@ def _state(coverage: Mapping, name: str) -> tuple[str, Any]:
     return str(state), entry.get("reason")
 
 
-def _count(counts: Mapping, name: str) -> int:
-    value = counts.get(name, 0)
+def _count(counts: Mapping, name: str) -> int | None:
+    """The recorded count, or None when it was never measured.
+
+    A missing key is an error (the ten counts are frozen), but a key holding
+    None is a fact: nobody measured it.  bool is an int subclass, so the type
+    check has to be exact or True would pass as 1.
+    """
+    if name not in counts:
+        raise ValueError("counts.%s is missing" % name)
+    value = counts[name]
+    if value is None:
+        return None
     if type(value) is not int or value < 0:
-        raise ValueError("counts.%s must be a non-negative integer" % name)
+        raise ValueError("counts.%s must be a non-negative integer or None" % name)
     return value
 
 
@@ -68,6 +95,66 @@ def _denominator(denominators: Mapping, name: str) -> int | None:
     if type(value) is not int or value < 0:
         raise ValueError("denominators.%s must be null or a non-negative integer" % name)
     return value
+
+
+def _artists_sentence(confirmed, pending, failed_pages, unverified) -> str | None:
+    """One sentence for the four artist buckets, mentioning only measured ones."""
+    head = None if confirmed is None else "确认当前范围处理完 %d 位" % confirmed
+    rest = [
+        text
+        for value, text in (
+            (pending, "%d 位待继续" % pending if pending is not None else None),
+            (failed_pages, "%d 位有失败页" % failed_pages if failed_pages is not None else None),
+            (
+                unverified,
+                "%d 位覆盖待核对" % unverified if unverified is not None else None,
+            ),
+        )
+        if text is not None
+    ]
+    if head and rest:
+        return head + "；" + "，".join(rest) + "。"
+    if head:
+        return head + "。"
+    if rest:
+        return "，".join(rest) + "。"
+    return None
+
+
+def _numbers_sentence(artworks, saved, already, excluded, unknown, duplicates) -> tuple[str, bool]:
+    """(sentence, has_a_number); an unmeasured number never becomes a digit.
+
+    ``duplicates`` is only mentioned when it is a measured, positive number:
+    "0 duplicates" and "nobody counted duplicates" are different facts, and
+    the second one must not turn into the first.
+    """
+    groups: list[str] = []
+    new_and_saved: list[str] = []
+    if artworks is not None:
+        new_and_saved.append("新增 %d 个作品" % artworks)
+    if saved is not None:
+        new_and_saved.append("保存 %d 页" % saved)
+    if new_and_saved:
+        groups.append("、".join(new_and_saved))
+    if already is not None:
+        groups.append("已有 %d 页通过完整核验" % already)
+    excluded_and_unknown = [
+        text
+        for value, text in (
+            (excluded, "筛选排除 %d 件" % excluded if excluded is not None else None),
+            (unknown, "字段未知 %d 件" % unknown if unknown is not None else None),
+        )
+        if text is not None
+    ]
+    if excluded_and_unknown:
+        groups.append("，".join(excluded_and_unknown))
+    if not groups:
+        return NO_SOURCE_SENTENCE, False
+    if duplicates:
+        # Right after the artwork/page numbers it belongs to; "其中" has to have
+        # something to refer to, which is why an empty sentence ignores it.
+        groups.insert(1, "其中重复分页 %d 件（未重复保存）" % duplicates)
+    return "；".join(groups) + "。", True
 
 
 def render(coverage: Mapping) -> list[str]:
@@ -102,21 +189,22 @@ def render(coverage: Mapping) -> list[str]:
     already = _count(counts, "pages_already_verified")
     excluded = _count(counts, "excluded_by_filter")
     unknown = _count(counts, "unknown_fields")
+    # duplicate_pages is the eleventh count; an older shape without it simply has
+    # nothing to say about duplicates, which is not an error.
+    duplicates = counts.get("duplicate_pages")
+    if duplicates is not None and (type(duplicates) is not int or duplicates < 0):
+        raise ValueError("counts.duplicate_pages must be a non-negative integer or None")
 
-    lines = ["本轮已检查 %d 位画师。" % checked]
-    lines.append(
-        "确认当前范围处理完 %d 位；%d 位待继续，%d 位有失败页，%d 位覆盖待核对。"
-        % (confirmed, pending, failed_pages, unverified)
+    lines = [
+        "本轮已检查 %d 位画师。" % checked if checked is not None else UNKNOWN_ARTISTS_SENTENCE
+    ]
+    artists_line = _artists_sentence(confirmed, pending, failed_pages, unverified)
+    if artists_line:
+        lines.append(artists_line)
+    numbers, has_number = _numbers_sentence(
+        artworks, saved, already, excluded, unknown, duplicates
     )
-
-    numbers = "新增 %d 个作品、保存 %d 页；已有 %d 页通过完整核验；筛选排除 %d 件，字段未知 %d 件。" % (
-        artworks,
-        saved,
-        already,
-        excluded,
-        unknown,
-    )
-    if coverage.get("sample") is True:
+    if has_number and coverage.get("sample") is True:
         numbers += "（示例）"
     lines.append(numbers)
 
@@ -151,7 +239,7 @@ def render(coverage: Mapping) -> list[str]:
         lines.append("结论: 本轮范围已查完，保存已齐。")
     else:
         # The negation must not repeat the forbidden words themselves: a reader
-        # grepping for "已穷尽" should only ever find a run that really finished.
+        # grepping for 已穷尽 should only ever find a run that really finished.
         lines.append("结论: 本轮没有查完、也没有保存齐；这些数字不能当作覆盖结论。")
     return lines
 
