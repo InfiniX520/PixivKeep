@@ -206,3 +206,39 @@ def test_the_error_is_a_value_error_with_a_code():
     assert isinstance(error, ValueError)
     assert error.code == "reason_code_unknown"
     assert "x" in str(error)
+
+
+def test_every_in_place_route_is_refused():
+    """`r |= {...}` used to slip past the frozen record: all routes are closed."""
+    record = fr.reason("favorites_below", "bookmarks", 5)
+    with pytest.raises(TypeError):
+        record |= {"code": "invented"}
+    with pytest.raises(TypeError):
+        record["code"] = "invented"
+    with pytest.raises(TypeError):
+        del record["code"]
+    for method, args in (
+        ("update", ({"code": "invented"},)),
+        ("setdefault", ("code", "invented")),
+        ("pop", ("code",)),
+        ("popitem", ()),
+        ("clear", ()),
+    ):
+        with pytest.raises(TypeError):
+            getattr(record, method)(*args)
+    assert record["code"] == "favorites_below"
+
+
+def test_a_copy_stays_frozen_and_an_explicit_dict_copy_is_validated():
+    import copy
+
+    record = fr.reason("ai_excluded", "ai_flag", True)
+    for clone in (copy.copy(record), copy.deepcopy(record)):
+        assert isinstance(clone, fr.FrozenReason)
+        with pytest.raises(TypeError):
+            clone["code"] = "invented"
+    explicit = dict(record)  # the one conversion that yields a plain dict
+    assert type(explicit) is dict
+    explicit["code"] = "invented"
+    with pytest.raises(fr.FilterReasonError):
+        fr.validate_reason(explicit)

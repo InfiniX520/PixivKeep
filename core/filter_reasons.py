@@ -94,6 +94,13 @@ class FrozenReason(dict):
 
     `MappingProxyType` would be immutable too, but `json.dumps` does not accept
     it; a dict subclass with closed mutators keeps both properties.
+
+    Every in-place route is closed: item assignment, the dict mutators, and the
+    `|=` operator.  `copy.copy` and `copy.deepcopy` come back frozen as well.
+    `dict(record)` still yields an ordinary mutable copy - that is the caller
+    explicitly asking for a plain dict - which is exactly why
+    :func:`validate_reason` exists and why consumers validate whatever arrives
+    from outside instead of trusting its shape.
     """
 
     def _refuse(self, *args: object, **kwargs: object) -> None:
@@ -106,9 +113,18 @@ class FrozenReason(dict):
     popitem = _refuse  # type: ignore[assignment]
     setdefault = _refuse  # type: ignore[assignment]
     update = _refuse  # type: ignore[assignment]
+    # `r |= other` goes through the C-level in-place operator, which does not
+    # call update(); without this line the union operator was a hole.
+    __ior__ = _refuse  # type: ignore[assignment]
 
-    def __reduce__(self):  # keeps copy/deepcopy honest
-        return (dict, (dict(self),))
+    def __copy__(self) -> "FrozenReason":
+        return FrozenReason(dict(self))
+
+    def __deepcopy__(self, memo: dict) -> "FrozenReason":
+        return FrozenReason(dict(self))
+
+    def __reduce__(self):  # pickling and any other copy route stay frozen too
+        return (FrozenReason, (dict(self),))
 
 
 def _scalar(value: object) -> bool:
