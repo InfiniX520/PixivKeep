@@ -2432,6 +2432,52 @@
       "deployed": false,
       "merged_to_main": false,
       "read_only_audit": true
+    },
+    {
+      "session_date": "2026-11-15",
+      "summary": "Second independent audit fixes: EA-01 P1 write capability (claim -> lease) and EA-02..EA-09; five lanes merged; frozen baseline 15/15; whole tree 3551 passed",
+      "round": "R10",
+      "fix_branch": "fix/a1-u1u2-e1-audit-20261115",
+      "audit_commit": "75f6ad6e5171f52019a14608b15ec1813a201baf",
+      "audited_product": "5661d8bb7e4f39b2ee4c5ea09257bd5cc4cd7651",
+      "daily_commit": "4ba891e34c312f049ef933eeb517da1e928b7575",
+      "contract": "docs/optimization/2026-11-15/S0_CONTRACTS_R2.md",
+      "closure": "docs/optimization/2026-11-15/CLOSURE_R2.md",
+      "maintenance_record": "docs/maintenance/2026-11-15_jpgpng_u1u2_e1_r2_fix.md",
+      "frozen_baseline": {
+        "file": "docs/audits/2026-11-15-u1u2-e1-independent/evidence/test_boundaries.py",
+        "before": "14 failed / 1 passed",
+        "after": "15 passed",
+        "unchanged": true
+      },
+      "results": {
+        "whole_tree": 3551,
+        "skipped": 5,
+        "body": 3424,
+        "tk_modules": 118,
+        "presentation": 9,
+        "tk_first_attempt_error": 1,
+        "tk_retry": "the one errored test passed in a fresh process; recorded, not counted as product failure"
+      },
+      "evidence": [
+        "verify/fullG.xml",
+        "verify/tkF.xml",
+        "verify/presF.xml",
+        "verify/pres_retry1.xml",
+        "verify/merge05_frozen.xml",
+        "verify/red_baseline_01.xml"
+      ],
+      "production_accepted": false,
+      "deployed": false,
+      "merged_to_main": false,
+      "open_gaps": [
+        "V2 stores no expected content version for a work page, so coverage delivery stops at unknown",
+        "a foreign -wal/-shm has no ownership model and therefore no reclaim path",
+        "the backup directory is pinned during the write (design trade-off, documented)",
+        "BatchPlan.remaining has no CLI surface yet",
+        "maintain.py has no --stop entry although backup_library(stop=) exists",
+        "the scan summary still prints stats.get('bytes_hashed', 0) for an unmeasured count"
+      ]
     }
   ]
 }

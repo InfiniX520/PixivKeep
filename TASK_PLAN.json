@@ -1677,7 +1677,7 @@
           "strategy": "五路合流；冻结文件 15/15；整套与 Tk 按已验证进程组织；写 CLOSURE_R2.md 逐项证据；同步 README/IMPLEMENTATION/docs 导航/TASK_PLAN/LOG；只读 fork 逐行复审 diff",
           "risk": "合流冲突与文档过度声明",
           "status": "已完成",
-          "verify": "冻结 15 passed；整套与 Tk 的最终计数见 .runtime/jpgpng_u1u2_e1_fix_20261115_01/verify/fullF.xml 与 tkF/presF.xml"
+          "verify": "冻结 15 passed；整套与 Tk 的最终计数见 .runtime/jpgpng_u1u2_e1_fix_20261115_01/verify/fullG.xml、tkF.xml、pres_retry1.xml"
         }
       ]
     }
