@@ -1609,5 +1609,77 @@
         }
       ]
     }
+  ],
+  "phases_R10": [
+    {
+      "phase": "U1/U2 第二轮独立审计修复（2026-11-15，EA-01…EA-09）",
+      "goal": "按 S0_CONTRACTS_R2 的八条契约关闭审计 75f6ad6 报的 1 P1 + 8 P2，每项给出红→绿证据；不合并 main、不切换日常 4ba891e",
+      "tasks": [
+        {
+          "id": "R10-0",
+          "title": "冻结八条契约与写入锁实测（S0）",
+          "strategy": "写 docs/optimization/2026-11-15/S0_CONTRACTS_R2.md（八条契约，每条生产者/消费者/未知/矛盾/过期）；用 probe_write_locks.py 在本机测出「持句柄挡替换、允许 SQLite 写」，并把脚本与实测输出一起入库",
+          "risk": "契约写错就等于自证；实测必须可重跑",
+          "status": "已完成",
+          "verify": "docs/optimization/2026-11-15/evidence/probe_write_locks/ 可重跑，结论写进 S0 §0"
+        },
+        {
+          "id": "R10-1",
+          "title": "写入能力 claim→lease（EA-01 P1）",
+          "strategy": "claim 只创建并记身份，写入能力由 lease 取得：按名打开后 fstat 比对 claim 身份，句柄保持到 SQLite 写完；父目录用 CreateFileW 钉住并比对卷号+索引，取不到时记 parent_pin=degraded",
+          "risk": "审计钩子在 claim 与 lease 之间仍能得手，必须由 lease 拒绝而不是靠挡住替换",
+          "status": "已完成",
+          "verify": "-k ea01 2 passed（审计钩子 hits=True 且哨兵 8192 字节不变）；tests/test_w1_online_backup_lease.py 15 例（a0e5bb5 基线上 9 红 6 绿）"
+        },
+        {
+          "id": "R10-2",
+          "title": "观察预算按真实读流计费（EA-02）",
+          "strategy": "ReadMeter 逐块 clamp+计费+查取消；_sha256 分块并在额度不足时返回 (None, reason)；DecodeReceipt 增加 bytes_read（缺失即 unknown，不兜底为 0）；budget.scope 改为 file_call",
+          "risk": "解码器不回传读量时不得把未知当 0",
+          "status": "已完成",
+          "verify": "-k ea02 2 failed→2 passed；tests/test_w2_budget_accounting.py 23 例（a0e5bb5 上 18 红 5 绿）；decode-check 文本输出预算行"
+        },
+        {
+          "id": "R10-3",
+          "title": "页完成必须比对期望内容代次（EA-03）",
+          "strategy": "expected 改为 page_identity→必需代次；只有「状态可证明保存且恰有一个观察代次等于必需代次」才算 delivered；同页多代次冲突即 park，期望侧矛盾即 unpinned",
+          "risk": "不能按列表顺序猜最新；缺代次只能 unknown",
+          "status": "已完成",
+          "verify": "-k ea03 2 passed；tests/test_w3_page_versions.py 24 例；覆盖链 257 tests 0 failed"
+        },
+        {
+          "id": "R10-4",
+          "title": "覆盖摘要读当前 V2 库（EA-04）",
+          "strategy": "新增 core/follow_facts_v2.py（一个只读事务读 library.sqlite3）；report_commands 增加 v2 provider 与 database_changed_during_read 守卫；runtime 默认 v2、legacy 仅显式；CLI --job/--run 互斥；界面任务 ID 可留空",
+          "risk": "V2 没有作品页期望代次，交付维度只能 unknown，不能假装闭合",
+          "status": "已完成",
+          "verify": "-k ea04 passed；tests/test_v2_coverage_facts.py 13 例 + tests/test_round2_integration.py 7 例（含 CLI 只读证明：sha256/mtime/目录清单不变）"
+        },
+        {
+          "id": "R10-5",
+          "title": "整理核心：集合守恒、续跑、冻结、范围完整性（EA-05/06/08）",
+          "strategy": "OPEN/AWAITING_VERIFY/FINAL 三分类，resume 含 applied；plan_batches 返回 BatchPlan 且 pool=done∪planned∪remaining；Batch 递归冻结、GroupScope 只读；memberships 与 artist 行交叉校验",
+          "risk": "applied 不是最终态；范围完整性不能只信顶层布尔",
+          "status": "已完成",
+          "verify": "-k 'ea05 or ea06 or ea08' 5 failed→5 passed；tests/test_w4_batch_plan.py 30 例 + tests/test_w4_group_scope.py 40 例；organizer 305 tests 0 failed"
+        },
+        {
+          "id": "R10-6",
+          "title": "审阅证据与报告范围（EA-07/09）",
+          "strategy": "classify 分离 match_strength 与 visual_evidence，只有 review_evidence() 能给 sufficient；build_report 在范围不覆盖时拒绝、更大范围需 superset_ok 并记录、三份输入来源对齐、decision 按 ACTION_FOR 真值表校验；batch-report 增加 --superset-ok/--rules-version/--account",
+          "risk": "标签分数不能冒充看图；范围不成立不能退 0",
+          "status": "已完成",
+          "verify": "-k 'ea07 or ea09' 2 failed→2 passed；tests/test_w5_visual_evidence.py 22 例 + tests/test_w5_report_scope.py 23 例；organizer 281 tests 0 failed"
+        },
+        {
+          "id": "R10-7",
+          "title": "合流、整套验收、文档与只读复审",
+          "strategy": "五路合流；冻结文件 15/15；整套与 Tk 按已验证进程组织；写 CLOSURE_R2.md 逐项证据；同步 README/IMPLEMENTATION/docs 导航/TASK_PLAN/LOG；只读 fork 逐行复审 diff",
+          "risk": "合流冲突与文档过度声明",
+          "status": "已完成",
+          "verify": "冻结 15 passed；整套与 Tk 的最终计数见 .runtime/jpgpng_u1u2_e1_fix_20261115_01/verify/fullF.xml 与 tkF/presF.xml"
+        }
+      ]
+    }
   ]
 }

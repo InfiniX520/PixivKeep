@@ -2975,6 +2975,22 @@ def _decode_lines(reports: list[dict[str, object]], code: int) -> list[str]:
                 "未知" if ceiling is None else "%d 字节" % int(ceiling),
             )
         )
+    if reports:
+        # The contract asks a multi-file run to say how many files it covered and
+        # what they added up to - and to say that this is a sum of per-file
+        # budgets, not one shared allowance.  A missing count stays 未知.
+        total = 0
+        missing = False
+        for item in reports:
+            value = (item.get("budget") or {}).get("bytes")
+            if value is None:
+                missing = True
+            else:
+                total += int(value)
+        lines.append(
+            "预算汇总: files=%d 各文件实测合计=%s（每个文件各自一份预算，不是共享总额）"
+            % (len(reports), "未知" if missing else "%d 字节" % total)
+        )
     if code == 0:
         lines.append("结论: 每个文件的解码都真的执行并通过。")
     elif code == 2:

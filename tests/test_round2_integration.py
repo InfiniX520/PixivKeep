@@ -158,6 +158,10 @@ def test_the_decode_text_output_names_one_file_budget_not_a_command_total(tmp_pa
     out = capsys.readouterr().out
     assert "预算:" in out
     assert "file_call" in out
+    # The contract asks for the file count and the sum, and for the wording that
+    # says this is not one shared allowance.
+    assert "预算汇总: files=1" in out
+    assert "不是共享总额" in out
     assert "command" not in out
     assert code in (0, 2, 4, 5)
 

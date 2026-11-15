@@ -132,6 +132,11 @@ class DesktopRuntime(CollectionRuntime):
 
         The default source is the V2 library the current downloader writes
         (download_logs/library.sqlite3), addressed by the job the user selected.
+        `run_id` is the historical name of that argument and means the same
+        thing: an id of one task in whichever store answers.  A caller that
+        really means the legacy crawl store must say so (provider="legacy" or
+        an explicit state_path); otherwise a legacy run id will be reported as
+        job_not_found instead of being read from the old database.
         The legacy crawl store is still readable, but only when a caller asks for
         it explicitly (state_path= or provider="legacy"), and the report says
         which one answered.  Read-only by construction: mode=ro plus query_only,

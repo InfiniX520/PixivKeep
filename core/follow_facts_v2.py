@@ -85,8 +85,19 @@ PAGE_STATE = {
     "recovery_needed": "failed",
 }
 
-#: Every other delivery state means "not delivered yet": a page that still
+#: Delivery states that are known to be "not delivered yet": a page that still
 #: owes work is parked for another look, never counted as saved.
+PENDING_STATES = (
+    "pending",
+    "transferring",
+    "validating",
+    "prepared",
+    "suspended",
+    "retry_wait",
+    "cancelled",
+)
+
+#: The state a known-pending delivery reports to the engine.
 PENDING_PAGE = "pending_verify"
 
 
@@ -271,8 +282,17 @@ def coverage_facts(connection: sqlite3.Connection, job_id: object) -> dict[str, 
             )
 
     observed: list[dict[str, Any]] = []
+    unmapped: set[str] = set()
     for (illust_id, page_index), row in sorted(deliveries.items()):
-        state = PAGE_STATE.get(str(row["state"]), PENDING_PAGE)
+        raw_state = str(row["state"])
+        state = PAGE_STATE.get(raw_state)
+        if state is None:
+            # An unknown state is not evidence of "waiting for a look", so the
+            # name is recorded as well: the page is parked, but the report can
+            # say which state V2 used instead of pretending it recognised it.
+            state = PENDING_PAGE
+            if raw_state not in PENDING_STATES:
+                unmapped.add(raw_state)
         artifact = artifacts.get(str(row["delivery_id"]))
         observed.append(
             {
@@ -323,6 +343,14 @@ def coverage_facts(connection: sqlite3.Connection, job_id: object) -> dict[str, 
     }
     if page_gaps:
         facts["page_gaps"] = page_gaps
+    if unmapped:
+        facts["unmapped_delivery_states"] = sorted(unmapped)
+    # Works whose decision was not "download" contribute no expected page, while
+    # the counter side calls every work minus the filtered ones deliverable.
+    # The two populations differ; the count travels so a report can say so.
+    facts["works_without_expected_pages"] = sum(
+        1 for item in items if str(item["decision"]) != "download"
+    )
     return facts
 
 

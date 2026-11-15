@@ -195,3 +195,33 @@ def test_desktop_summary_keeps_the_legacy_store_available_by_request(tmp_path):
     with pytest.raises(ReportError) as raised:
         runtime._coverage_summary(run_id="run-1", provider="legacy")
     assert raised.value.code in {"database_unreadable", "query_failed", "database_missing"}
+def test_the_notes_follow_the_facts_instead_of_a_hard_coded_gap(tmp_path, monkeypatch):
+    """When V2 starts recording a required version, the note must stop saying
+    "missing" by itself - a hard-coded string would become a lie silently."""
+    from core import report_commands as commands
+
+    library, job = _finished_job(tmp_path)
+    real = commands.coverage_facts
+
+    def with_versions(connection, job_id):
+        facts = real(connection, job_id)
+        for item in facts["pages"]["expected"]:
+            item["content_sha256"] = item["content_sha256"] or "a" * 64
+        return facts
+
+    monkeypatch.setattr(commands, "coverage_facts", with_versions)
+    payload = commands.coverage_report_v2(library, job["job_id"])
+    assert payload["facts_notes"]["expected_content_version"] == "present"
+
+
+def test_works_without_an_expected_page_are_counted_and_explained(tmp_path):
+    """The "deliverable works" counter and the expected page set are different
+    populations; the payload has to say so rather than leave the gap implicit."""
+    library, job = _finished_job(tmp_path)
+    facts = _facts(library, job["job_id"])
+    assert facts["works_without_expected_pages"] == 0
+    payload = pytest.importorskip("core.report_commands").coverage_report_v2(
+        library, job["job_id"]
+    )
+    assert "works_without_expected_pages" not in payload["facts_notes"]
+

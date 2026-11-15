@@ -28,7 +28,13 @@ from typing import Any, Mapping
 
 from core.crawl_state_reader import CrawlStateUnreadable, ReadOnlyCrawlState
 from core.follow_coverage import CoverageError, build_coverage
-from core.follow_facts_v2 import V2FactsError, coverage_facts, read_only_connection
+from core.follow_facts_v2 import (
+    READ_ONLY_IMMUTABLE,
+    V2FactsError,
+    coverage_facts,
+    read_only_connection,
+    read_only_mode,
+)
 from core.follow_coverage_text import render
 from core.follow_facts import StateSource, gather_facts
 from core.filter_explain import explain
@@ -132,6 +138,7 @@ def coverage_report_v2(database: Path, job_id: str) -> dict[str, Any]:
     # immutable (no lock, no index file), so the only defence left is to compare
     # the file before and after: a main file that changed under the read means
     # the numbers describe no single moment.
+    mode = read_only_mode(database)
     before = _file_stamp(database)
     try:
         connection.execute("BEGIN")
@@ -143,7 +150,11 @@ def coverage_report_v2(database: Path, job_id: str) -> dict[str, Any]:
         raise
     finally:
         connection.close()
-    if _file_stamp(database) != before:
+    # Only the immutable read needs this: it holds no lock, so the file is the
+    # only thing that can tell us whether the bytes moved.  A locking read
+    # (mode=ro) already sees one consistent snapshot, and a concurrent
+    # checkpoint there is not a reason to refuse the report.
+    if mode == READ_ONLY_IMMUTABLE and _file_stamp(database) != before:
         raise ReportError(
             "database_changed_during_read",
             "%s 在读取期间被改写；这次摘要不属于任何单一时刻" % database,
@@ -155,10 +166,15 @@ def coverage_report_v2(database: Path, job_id: str) -> dict[str, Any]:
         raise ReportError("facts_rejected", str(error)) from None
     payload = coverage.as_dict()
     expected = (facts.get("pages") or {}).get("expected") or []
+    # Whether a required version exists is read from the facts, not assumed: when
+    # V2 starts recording one, this line must stop saying "missing" by itself.
+    versions = [item.get("content_sha256") for item in expected]
     notes = {
         "provider": "v2",
         "page_evidence": "present" if expected else "missing",
-        "expected_content_version": "missing",
+        "expected_content_version": (
+            "present" if any(versions) else "missing"
+        ),
         "note": (
             "V2 保存了应有页集合与落盘摘要，但没有保存作品页的期望内容代次；"
             "因此交付维度只能到 unknown，不能声称本轮页面已齐"
@@ -166,6 +182,17 @@ def coverage_report_v2(database: Path, job_id: str) -> dict[str, Any]:
     }
     if facts.get("page_gaps"):
         notes["pages_expected_missing"] = len(facts["page_gaps"])
+    if facts.get("works_without_expected_pages"):
+        # "可交付作品数" counts every work minus the filtered ones; the expected
+        # page set only covers works whose decision was download.  Saying both
+        # numbers without this note invites dividing one by the other.
+        notes["works_without_expected_pages"] = facts["works_without_expected_pages"]
+        notes["unit_note"] = (
+            "可交付作品数按 works_seen 减被过滤计算，与实际应有页数（只统计 decision=download 的作品）"
+            "口径不同，两者不能相除"
+        )
+    if facts.get("unmapped_delivery_states"):
+        notes["unmapped_delivery_states"] = list(facts["unmapped_delivery_states"])
     return {
         "question": "follow_coverage",
         "provider": "v2",
