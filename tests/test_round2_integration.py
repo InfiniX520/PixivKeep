@@ -94,6 +94,38 @@ def test_the_coverage_command_reads_a_v2_job_and_says_so(tmp_path, capsys):
     assert payload["exit_code"] == 2
 
 
+def test_the_coverage_command_leaves_the_library_byte_identical(tmp_path, capsys):
+    """A read-only report must be provably read-only: bytes, time, directory."""
+    import hashlib
+
+    from core.library_repository import LibraryRepository
+    from delivery_fixtures import Response, Transport, executor, make_job, run
+
+    logs = tmp_path / "download_logs"
+    logs.mkdir()
+    library = logs / "library.sqlite3"
+    with LibraryRepository(library) as repository:
+        job, deliveries, _ = make_job(repository, artwork="951", count=1)
+        assert run(repository, job, deliveries[0], executor(
+            repository, logs, Transport(Response()))).state == "completed"
+    before = (
+        hashlib.sha256(library.read_bytes()).hexdigest(),
+        library.stat().st_mtime_ns,
+        sorted(path.name for path in logs.iterdir()),
+    )
+    code = m.main([
+        "coverage", "--database", str(library), "--job", job["job_id"], "--json",
+    ])
+    capsys.readouterr()
+    after = (
+        hashlib.sha256(library.read_bytes()).hexdigest(),
+        library.stat().st_mtime_ns,
+        sorted(path.name for path in logs.iterdir()),
+    )
+    assert after == before
+    assert code != 0  # the conclusion is "unproven", not "fine"
+
+
 def test_the_coverage_command_refuses_to_guess_which_store_to_read(capsys):
     code = m.main(["coverage", "--database", "nowhere.sqlite3", "--json"])
     payload = json.loads(capsys.readouterr().out)
