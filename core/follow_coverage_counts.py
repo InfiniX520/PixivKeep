@@ -9,9 +9,12 @@ different things:
   undecided.  A work is not an image page: one work can be three pages, so no
   identity here may compare a work count with a page count.
 * **pages** - image pages, counted by page identity and content version, and
-  only from real page evidence (expected page set + per-page observations).
-  Without that evidence the page side is unknown, and the delivery cannot be
-  called complete - which is the honest answer for crawl facts alone.
+  only from real page evidence (expected page -> required content version, plus
+  per-page observations).  A page proves delivery only when one observation of
+  it carries *the* required content version: a page whose requirement is
+  unpinned cannot be proven, and neither can one observed with another version.
+  Without page evidence at all the page side is unknown, and the delivery
+  cannot be called complete - which is the honest answer for crawl facts alone.
 
 A run level total may fill a work or a legacy page number; nothing may be
 scaled up from the artists list except artworks_seen, and only when that list
@@ -81,6 +84,18 @@ PAGE_STATE_BUCKETS: dict[str, str] = {
 _WORKS_TOTAL_ALIASES = ("works_seen", "artworks_seen")
 _WORKS_GRAND_TOTAL_ALIASES = ("artworks_total", "works_total")
 _CONTENT_VERSION_KEYS = ("content_sha256", "content_version", "sha256")
+
+#: Page states that can prove delivery.  Any other state is a gap, not a save.
+PROVING_PAGE_STATES = ("saved_new", "already_verified")
+
+#: One page's verdict against its *required* content version.  Deliberately a
+#: closed vocabulary: "we saved something" and "we saved what was required"
+#: are different answers, and the delivery formula must not merge them.
+DELIVERED = "delivered"
+MISSING = "missing"          # no observation, or one that cannot prove a save
+STALE = "stale"              # observed content version is not the required one
+UNPINNED = "unpinned"        # the requirement carries no content version
+UNVERSIONED = "unversioned"  # the observation proves a save but carries none
 
 
 def _int_or_none(value: object) -> int | None:
@@ -171,16 +186,45 @@ def _page_identity(item: object) -> str:
     raise ValueError("a page identity must be a string or a mapping")
 
 
-def _content_version(item: Mapping) -> str:
+def _content_version(item: Mapping) -> str | None:
+    """The content version this row states, or None when it states none."""
     for key in _CONTENT_VERSION_KEYS:
         value = item.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return ""
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _expected_pages(raw: object, reasons: list) -> dict[str, str | None]:
+    """identity -> required content version (None when the row pins none).
+
+    The expected side used to be reduced to a set of identities, which threw
+    the requirement itself away: afterwards any non-empty observed version
+    counted as delivered.  Keeping the mapping is what lets a page be proven
+    or refused instead of merely observed.  Two rows for one identity that
+    disagree on the version contradict each other, so that page becomes
+    unpinned rather than silently taking whichever row came last.
+    """
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError("facts.pages.expected must be a list")
+    expected: dict[str, str | None] = {}
+    contradicted = 0
+    for item in raw:
+        identity = _page_identity(item)
+        version = _content_version(item) if isinstance(item, Mapping) else None
+        if identity in expected:
+            if expected[identity] != version:
+                contradicted += 1
+                expected[identity] = None
+            continue
+        expected[identity] = version
+    if contradicted:
+        reasons.append("expected_content_conflict:%d" % contradicted)
+    return expected
 
 
 def _page_evidence(value: object, reasons: list):
-    """(expected identities | None, per-page state, duplicates, conflicts)."""
+    """(requirements | None, per-page observations, duplicates, conflicts)."""
     if value is None:
         return None, {}, 0, 0
     if not isinstance(value, Mapping):
@@ -189,9 +233,7 @@ def _page_evidence(value: object, reasons: list):
     expected = None
     raw = value.get("expected")
     if raw is not None:
-        if not isinstance(raw, (list, tuple)):
-            raise ValueError("facts.pages.expected must be a list")
-        expected = tuple(sorted({_page_identity(item) for item in raw}))
+        expected = _expected_pages(raw, reasons)
 
     observed = value.get("observed")
     if observed is None:
@@ -201,7 +243,7 @@ def _page_evidence(value: object, reasons: list):
 
     pages: dict[str, dict[str, Any]] = {}
     duplicates = 0
-    conflicts = 0
+    state_conflicts = 0
     for item in observed:
         if not isinstance(item, Mapping):
             raise ValueError("facts.pages.observed entries must be mappings")
@@ -209,31 +251,63 @@ def _page_evidence(value: object, reasons: list):
         state = item.get("state")
         if state not in PAGE_STATE_BUCKETS:
             raise ValueError("unknown page state: %r" % (state,))
-        content = _content_version(item)
+        version = _content_version(item)
         entry = pages.get(identity)
         if entry is None:
-            pages[identity] = {"state": state, "content": {content} if content else set()}
+            pages[identity] = {
+                "state": state,
+                "versions": {version} if version else set(),
+            }
             continue
         duplicates += 1
-        if content:
-            entry["content"].add(content)
+        if version:
+            entry["versions"].add(version)
         if entry["state"] != state:
-            conflicts += 1
+            state_conflicts += 1
             # Two observations, two answers: neither can be trusted to prove
             # delivery, so the page is parked in "needs another look".
             entry["state"] = "pending_verify"
-    if conflicts:
-        reasons.append("page_state_conflict:%d" % conflicts)
-    return expected, pages, duplicates, conflicts
+    if state_conflicts:
+        reasons.append("page_state_conflict:%d" % state_conflicts)
+
+    # A page observed with two different content versions is a contradiction
+    # even when both observations agree on the state: "one of them matches" is
+    # not a proof, and picking the newer one would be guessing from list order.
+    contradictory = sorted(
+        identity for identity, entry in pages.items() if len(entry["versions"]) > 1
+    )
+    for identity in contradictory:
+        pages[identity]["state"] = "pending_verify"
+    if contradictory:
+        reasons.append("page_content_conflict:%d" % len(contradictory))
+    return expected, pages, duplicates, state_conflicts + len(contradictory)
 
 
-def _delivered(identity: str, pages: Mapping[str, Any]) -> bool:
+def _page_verdict(identity: str, required: str | None, pages: Mapping[str, Any]) -> str:
+    """Did this page deliver *the required* content version?
+
+    The ways to fail are kept apart because they mean different things to the
+    person who has to fix them: nothing was saved (MISSING), something else was
+    saved (STALE), or the evidence cannot say which version was required or was
+    saved (UNPINNED, UNVERSIONED).  Only DELIVERED proves the page.
+
+    A page observed with two different versions never reaches here as a
+    "delivered" candidate: _page_evidence parks it as pending_verify, so it is
+    a MISSING page and the contradiction is counted separately.
+    """
     entry = pages.get(identity)
     if entry is None:
-        return False
-    if entry["state"] not in ("saved_new", "already_verified"):
-        return False
-    return bool(entry["content"])
+        return MISSING
+    if entry["state"] not in PROVING_PAGE_STATES:
+        return MISSING
+    versions = entry["versions"]
+    if len(versions) > 1:  # pragma: no cover - parked before the verdict runs
+        return MISSING
+    if not versions:
+        return UNPINNED if required is None else UNVERSIONED
+    if required is None:
+        return UNPINNED
+    return DELIVERED if next(iter(versions)) == required else STALE
 
 
 def coverage_counts(facts: object) -> dict[str, object]:
@@ -348,7 +422,7 @@ def coverage_counts(facts: object) -> dict[str, object]:
         if covered > len(expected):
             consistent = False
             reasons.append("page_buckets_exceed_expected:%d>%d" % (covered, len(expected)))
-        extra = [identity for identity in pages if identity not in set(expected)]
+        extra = [identity for identity in pages if identity not in expected]
         if extra:
             reasons.append("observed_page_outside_expected:%d" % len(extra))
 
@@ -374,16 +448,47 @@ def coverage_counts(facts: object) -> dict[str, object]:
             "missing": None,
         }
     else:
-        missing = [identity for identity in expected if not _delivered(identity, pages)]
-        if not missing:
-            delivery = {"state": "complete", "reason": None, "expected": len(expected), "missing": 0}
+        verdicts = {
+            identity: _page_verdict(identity, required, pages)
+            for identity, required in expected.items()
+        }
+        missing = sorted(
+            identity for identity, verdict in verdicts.items()
+            if verdict in (MISSING, STALE)
+        )
+        stale = sorted(i for i, v in verdicts.items() if v == STALE)
+        # A page carrying two different observed versions is a contradiction in
+        # the evidence itself, whether or not its state still looks saved.
+        contradictory = sorted(
+            identity
+            for identity in expected
+            if len(pages.get(identity, {}).get("versions", ())) > 1
+        )
+        unpinned = sorted(i for i, v in verdicts.items() if v == UNPINNED)
+        unversioned = sorted(i for i, v in verdicts.items() if v == UNVERSIONED)
+        if stale:
+            reasons.append("page_content_mismatch:%d" % len(stale))
+        if missing:
+            state, reason = "incomplete", "pages_not_delivered:%d" % len(missing)
+        elif unpinned:
+            state = "unknown"
+            reason = "expected_content_version_missing:%d" % len(unpinned)
+        elif unversioned:
+            state = "unknown"
+            reason = "observed_content_version_missing:%d" % len(unversioned)
         else:
-            delivery = {
-                "state": "incomplete",
-                "reason": "pages_not_delivered:%d" % len(missing),
-                "expected": len(expected),
-                "missing": len(missing),
-            }
+            state, reason = "complete", None
+        delivery = {
+            "state": state,
+            "reason": reason,
+            "expected": len(expected),
+            "missing": len(missing),
+            "delivered": len(expected) - len(missing) - len(unpinned) - len(unversioned),
+            "stale": len(stale),
+            "conflict": len(contradictory),
+            "unpinned": len(unpinned),
+            "unversioned": len(unversioned),
+        }
 
     for key in COUNT_KEYS:
         value = counts.get(key)

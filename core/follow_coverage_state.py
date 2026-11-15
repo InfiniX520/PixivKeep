@@ -28,6 +28,9 @@ delivery     <given>   facts["delivery"] carries a valid state
                        outranks an unknown one), or run not completed, or a
                        finished run that saved fewer pages than it should have
              missing   the same shortfall when nothing at all was saved
+             <either>  the reason is pages_content_mismatch:<n> when n of the
+                       missing pages were saved with another content version:
+                       "required bytes absent" and "nothing saved" differ
              unknown   saving_not_measured: pages_saved itself is absent;
                        saving_not_provable:<key>: works_seen or excluded_by_filter
                        is absent, so "how many pages should exist" cannot be
@@ -199,11 +202,21 @@ def _delivery(
         if state == "incomplete":
             missing = evidence.get("missing")
             expected = evidence.get("expected")
+            stale = evidence.get("stale")
             missing_count = missing if type(missing) is int else 0
             expected_count = expected if type(expected) is int else 0
+            stale_count = stale if type(stale) is int else 0
+            # A page saved with another content version is not the page that was
+            # required, so it stays a gap; but "nothing was saved" would be a
+            # different, false statement, so the reason names the mismatch.
+            reason = (
+                "pages_content_mismatch:%d" % stale_count
+                if stale_count
+                else "pages_not_delivered:%d" % missing_count
+            )
             if missing_count and missing_count == expected_count:
-                return {"state": "missing", "reason": "pages_not_delivered:%d" % missing_count}
-            return {"state": "partial", "reason": "pages_not_delivered:%d" % missing_count}
+                return {"state": "missing", "reason": reason}
+            return {"state": "partial", "reason": reason}
         return {
             "state": "unknown",
             "reason": str(evidence.get("reason") or "page_evidence_missing:pages_expected"),

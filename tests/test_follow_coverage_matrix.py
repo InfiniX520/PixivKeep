@@ -182,7 +182,8 @@ def test_no_crawl_only_fixture_claims_a_complete_overall():
 def test_page_evidence_is_what_turns_the_overall_complete():
     facts = facts_for("all_complete")
     facts["pages"] = {
-        "expected": ["w-1#0"],
+        # 此用例原先按旧语义（身份集合）写成，2026-11-15 审计 EA-03 后按契约 §3 改为期望携带内容代次
+        "expected": [{"page_identity": "w-1#0", "content_sha256": "abc"}],
         "observed": [{"page_identity": "w-1#0", "state": "saved_new", "content_sha256": "abc"}],
     }
     cov = build_coverage(facts, scope=SCOPE)
