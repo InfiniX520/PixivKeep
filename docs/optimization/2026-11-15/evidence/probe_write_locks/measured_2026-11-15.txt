@@ -1,0 +1,19 @@
+measurement: 2026-11-15, shared interpreter D:\Miniconda3\envs\JuiLiu\python.exe -s -B -X utf8
+host: Windows, single volume, temp directory only, no real library
+
+held handle on target.sqlite3 (size 8192)
+unlink name while handle held              BLOCKED   PermissionError/32
+os.replace onto held name                  BLOCKED   PermissionError/5
+unlink+hardlink victim onto held name      BLOCKED   PermissionError/32
+sqlite3 write through held name            OK        8192
+sqlite3 backup into held empty file        OK        8192
+unlink after close                         BLOCKED   PermissionError/32
+rename dir while dir handle held           BLOCKED   PermissionError/32
+create child while dir handle held         OK        created
+delete child while dir handle held         OK        None
+rename dir after dir handle closed         OK        renamed
+rename dir, handle shares delete           OK        renamed
+
+note: 'unlink after close BLOCKED 32' is the probe's own artefact: the same file had just been
+re-opened by sqlite3 and closed through it; the handle measured there is SQLite's, not ours.
+the first five lines are the facts the contract uses.
