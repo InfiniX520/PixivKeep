@@ -244,19 +244,45 @@ def test_a_bad_measurement_value_is_refused(bad):
         sample(measured={"bytes": bad})
 
 
-def test_a_scope_that_does_not_cover_the_batch_is_flagged():
+def test_a_scope_that_does_not_cover_the_batch_is_refused():
+    # EA-09: this used to be a field in a successful report (covers_batch=false,
+    # exit 0).  An artist the scope never selected cannot be reported on, so the
+    # combination is refused instead of annotated.
+    with pytest.raises(ReportError) as caught:
+        build_report(
+            make_batch(pool=["1001", "1002", "1003", "9999"]),
+            [decision("1001", "unchanged")],
+            make_scope(),
+        )
+    assert caught.value.code == "scope_excludes_batch"
+    assert caught.value.detail == ["9999"]
+
+
+def test_a_wider_scope_is_refused_by_default_and_recorded_when_declared():
+    # One group planned in several batches makes the scope wider than the batch;
+    # that is legitimate, but it changes what the totals mean, so it is opt-in.
+    narrow_batch = make_batch(pool=["1001"])
+    with pytest.raises(ReportError) as caught:
+        build_report(narrow_batch, [decision("1001", "unchanged")], make_scope())
+    assert caught.value.code == "scope_broader_than_batch"
+    assert caught.value.detail == ["1002", "1003"]
+
     report = build_report(
-        make_batch(pool=["1001", "1002", "1003", "9999"]),
-        [decision("1001", "unchanged")],
-        make_scope(),
+        narrow_batch, [decision("1001", "unchanged")], make_scope(), superset_ok=True
     )
-    assert report["scope"]["covers_batch"] is False
+    assert report["scope"]["covers_batch"] is True
     assert report["scope"]["artist_count"] == 3
+    assert report["scope"]["superset"] == {
+        "allowed": True,
+        "extra_artists": ["1002", "1003"],
+    }
 
 
 def test_an_empty_batch_reports_zero_and_no_unknowns():
     empty = plan_batch([], account_id="acct-1", artists=5, requests=5)
-    report = build_report(empty, [], make_scope())
+    # An empty batch covers no artist, so the scope is wider than it; the caller
+    # has to say so (EA-09) even though there is nobody to report about.
+    report = build_report(empty, [], make_scope(), superset_ok=True)
     assert report["counts"]["total"] == 0
     assert report["unknowns"] == []
     assert report["planned_vs_measured"]["state"] == "unknown"

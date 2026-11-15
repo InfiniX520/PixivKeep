@@ -17,11 +17,14 @@ import json
 from typing import Any, Mapping
 
 from organizer.batches import STATES, Batch, BatchError
-from organizer.conflicts import ACTIONS, KINDS
+from organizer.conflicts import ACTION_FOR, ACTIONS, KINDS
 from organizer.group_scope import COMPLETENESS
 
 #: Bumped when a consumer would have to read a different shape.
-REPORT_VERSION = 1
+#: 2: scope.superset and the provenance identities were added, and covers_batch
+#:    can no longer be false in a report that exists - the combination is a
+#:    refusal now, not a field.
+REPORT_VERSION = 2
 
 #: The measurement keys a caller may supply.  A closed set: an unknown key is
 #: a typo, and reporting it as a measurement would be worse than failing.
@@ -67,7 +70,16 @@ def _measured(value: object) -> dict | None:
 
 
 def _decision_rows(decisions: object) -> dict:
-    """Index decisions by artist, refusing two answers for one artist."""
+    """Index decisions by artist, refusing two answers for one artist.
+
+    Each field is checked against the closed tables, and then the *combination*
+    is checked against the one truth table the conflict pass already uses
+    (organizer.conflicts.ACTION_FOR).  Seven legal kinds and three legal actions
+    are 21 combinations of which 7 make sense; "unchanged" with "replan" (or
+    "needs_human": true on an unchanged artist) used to pass because each field
+    was valid on its own, which is how a report ends up describing a decision
+    nobody could have made (EA-09, S0 section 8).
+    """
     if decisions is None:
         return {}
     rows: dict = {}
@@ -83,6 +95,22 @@ def _decision_rows(decisions: object) -> dict:
         action = row.get("action")
         if action not in ACTIONS:
             raise ReportError("decision_action_invalid", (artist_id, action))
+        expected = ACTION_FOR.get(kind)
+        if expected is None:
+            # KINDS and ACTION_FOR are two closed tables; a kind in one and not
+            # the other is a code defect, and guessing an action would hide it.
+            raise ReportError("decision_kind_unmapped", (artist_id, kind))
+        if action != expected:
+            raise ReportError(
+                "decision_action_mismatch", (artist_id, kind, action, expected)
+            )
+        needs_human = row.get("needs_human", False)
+        if not isinstance(needs_human, bool):
+            raise ReportError("decision_needs_human_invalid", (artist_id, needs_human))
+        if needs_human != (expected == "needs_human"):
+            raise ReportError(
+                "decision_needs_human_mismatch", (artist_id, kind, needs_human)
+            )
         if artist_id in rows:
             raise ReportError("decision_duplicate", artist_id)
         rows[artist_id] = row
@@ -170,6 +198,59 @@ def _planned_vs_measured(batch: Batch, measured: object) -> dict:
     }
 
 
+def _inputs_agree(batch: Batch, scope: Any, rules_version: object,
+                  account_id: object) -> None:
+    """Refuse three inputs that describe different accounts, snapshots or rules.
+
+    Only facts both sides actually carry are compared: a batch planned without a
+    snapshot id is *unknown*, not a contradiction, and an empty value must never
+    be read as agreement.  Each disagreement has its own code so a caller can
+    tell "the scope came from another snapshot" from "the rules moved".
+    """
+    batch_snapshot = str((batch.scope or {}).get("snapshot_id") or "")
+    scope_snapshot = str(getattr(scope, "snapshot_id", "") or "")
+    if batch_snapshot and scope_snapshot and batch_snapshot != scope_snapshot:
+        raise ReportError("snapshot_mismatch", (batch_snapshot, scope_snapshot))
+    batch_rules = str((batch.scope or {}).get("rules_version") or "")
+    given_rules = str(rules_version or "")
+    if given_rules and batch_rules and given_rules != batch_rules:
+        raise ReportError("rules_version_mismatch", (given_rules, batch_rules))
+    if account_id is not None:
+        if not isinstance(account_id, str) or not account_id.strip():
+            raise ReportError("account_invalid", account_id)
+        if account_id != batch.account_id:
+            raise ReportError("account_mismatch", (account_id, batch.account_id))
+    source = getattr(scope, "source", None)
+    if isinstance(source, Mapping):
+        declared = source.get("account_id")
+        if isinstance(declared, str) and declared and declared != batch.account_id:
+            raise ReportError("account_scope_mismatch", (declared, batch.account_id))
+
+
+def _containment(batch: Batch, scope: Any, superset_ok: bool) -> dict:
+    """The batch must sit inside the scope, and a wider scope must be declared.
+
+    Missing artists are always a refusal: a report row for an artist the scope
+    never selected would describe somebody the scope does not cover, and its
+    group list would come from a different member set.  A *wider* scope is the
+    ordinary case when one group is planned in several batches, but it changes
+    what the totals mean, so it is allowed only when the caller says so and the
+    extra artists are recorded (EA-09, S0 section 8).
+    """
+    batch_ids = set(batch.artist_ids)
+    covered = set(getattr(scope, "artist_ids") or ())
+    missing = sorted(batch_ids - covered)
+    extra = sorted(covered - batch_ids)
+    if missing:
+        raise ReportError("scope_excludes_batch", missing)
+    if extra and not superset_ok:
+        raise ReportError("scope_broader_than_batch", extra)
+    return {
+        "covers_batch": True,
+        "superset": {"allowed": bool(extra), "extra_artists": extra},
+    }
+
+
 def build_report(
     batch: object,
     decisions: object,
@@ -178,15 +259,30 @@ def build_report(
     measured: object = None,
     generated_at: object = "",
     rules_version: object = "",
+    superset_ok: bool = False,
+    account_id: object = None,
 ) -> dict:
-    """Turn one batch, its decisions and its scope into a report dict."""
+    """Turn one batch, its decisions and its scope into a report dict.
+
+    The three inputs have to describe the same thing before a single row is
+    counted: the batch must sit inside the scope (a wider scope only with
+    superset_ok=True, and then it is recorded), the snapshot/rules/account the
+    inputs carry must agree where both sides actually carry them, and every
+    decision must be a combination its own truth table allows.  A report that
+    cannot pass those checks is a refusal with a code, never a successful
+    document with a warning inside it.
+    """
     if not isinstance(batch, Batch):
         raise ReportError("batch_invalid", type(batch).__name__)
+    if type(superset_ok) is not bool:
+        raise ReportError("scope_option_invalid", superset_ok)
     for name in ("fingerprint", "completeness", "artist_ids"):
         if not hasattr(scope, name):
             raise ReportError("scope_invalid", name)
     if getattr(scope, "completeness") not in COMPLETENESS:
         raise ReportError("scope_invalid", "completeness")
+    _inputs_agree(batch, scope, rules_version, account_id)
+    containment = _containment(batch, scope, superset_ok)
 
     rows = _decision_rows(decisions)
     artist_ids = list(batch.artist_ids)
@@ -252,7 +348,8 @@ def build_report(
             "completeness": coverage,
             "unknown_reason": getattr(scope, "unknown_reason", ""),
             "artist_count": len(covered),
-            "covers_batch": set(artist_ids) <= covered,
+            "covers_batch": containment["covers_batch"],
+            "superset": containment["superset"],
         },
         "per_artist": per_artist,
         "counts": counts,
@@ -272,6 +369,8 @@ def build_report(
             "rules_version": str(
                 rules_version or (batch.scope.get("rules_version") if batch.scope else "") or ""
             ),
+            "scope_snapshot_id": str(getattr(scope, "snapshot_id", "") or ""),
+            "scope_completeness": coverage,
             "generated_at": str(generated_at or ""),
         },
     }

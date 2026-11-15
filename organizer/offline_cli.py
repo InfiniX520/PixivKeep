@@ -218,8 +218,21 @@ def cmd_batch_report(args):
             "report_engine_missing",
             "organizer.report 尚未合流；这批命令只组装，不自己算报告",
         )
+    options = {}
+    if getattr(args, "rules_version", None):
+        options["rules_version"] = args.rules_version
+    if getattr(args, "account", None):
+        options["account_id"] = args.account
     try:
-        report = builder(batch, decisions, scope, measured=None, generated_at="")
+        report = builder(
+            batch,
+            decisions,
+            scope,
+            measured=None,
+            generated_at="",
+            superset_ok=bool(getattr(args, "superset_ok", False)),
+            **options,
+        )
     except TypeError as error:
         raise OfflineRefusal("report_engine_contract", error) from None
     except OrganizerError as error:
@@ -231,6 +244,10 @@ def cmd_batch_report(args):
             ) from None
         raise
     data = _json_safe(report)
+    if not (data.get("scope") or {}).get("covers_batch"):
+        # build_report already refuses this; an engine that ever returned such a
+        # report must still not be called usable by this command.
+        raise OfflineRefusal("report_scope_inconsistent", "covers_batch=false")
     lines = _report_lines(data)
     unproven = scope.completeness != "complete" or bool(data.get("unknowns"))
     payload = {
@@ -315,6 +332,17 @@ def register(commands):
     batch_report.add_argument("--batch", type=Path, required=True)
     batch_report.add_argument("--decisions", type=Path, required=True)
     batch_report.add_argument("--scope", type=Path, required=True)
+    batch_report.add_argument(
+        "--superset-ok",
+        action="store_true",
+        help="允许范围大于批次（整组分成多批时的正常情形），并在报告里记录哪些画师在批次之外",
+    )
+    batch_report.add_argument(
+        "--rules-version", default=None, help="当前规则版本；与批次记录不一致时拒绝"
+    )
+    batch_report.add_argument(
+        "--account", default=None, help="当前账号；与批次记录不一致时拒绝"
+    )
     for parser in (batch_plan, scope_plan, batch_report):
         parser.add_argument("--json", action="store_true", help="输出 JSON 而不是文本")
     return commands

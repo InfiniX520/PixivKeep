@@ -34,11 +34,16 @@ def base():
 
 
 def test_a_single_strong_hit_is_enough_to_recommend_a_group():
+    # EA-07: a weight-2 tag match recommends the group, and that is all it does.
+    # It cannot certify that anybody looked at the works, so the answer is not
+    # "high, nothing more needed" without a verified review receipt.
     result = classify({"tags": ["cat"]}, base())
     assert result["groups"] == ["animal"]
-    assert result["confidence"] == "high"
-    assert result["needs_more"] is False
-    assert result["reasons"] == []
+    assert result["match_strength"] == "high"
+    assert result["confidence"] == "low"
+    assert result["needs_more"] is True
+    assert result["visual_evidence"]["state"] == "unknown"
+    assert result["reasons"] == ["visual_evidence_missing", "low_confidence"]
     assert result["anchors"] == [
         {
             "rule_id": "r-topic",
@@ -104,7 +109,8 @@ def test_the_rule_text_is_literal_and_never_a_pattern():
 def test_two_hits_are_ranked_by_weight_then_name():
     result = classify({"tags": ["cute", "cat"]}, base())
     assert result["groups"] == ["animal", "kawaii"]
-    assert result["confidence"] == "high"
+    assert result["match_strength"] == "high"
+    assert result["confidence"] == "low"
 
 
 def test_the_same_group_suggested_twice_appears_once_with_summed_weight():
@@ -114,7 +120,8 @@ def test_the_same_group_suggested_twice_appears_once_with_summed_weight():
     )
     result = classify({"tags": ["cat", "cute"]}, both)
     assert result["groups"] == ["animal"]
-    assert result["confidence"] == "high"
+    assert result["match_strength"] == "high"
+    assert result["confidence"] == "low"
 
 
 def test_more_than_five_groups_are_truncated_and_say_so():
@@ -191,13 +198,16 @@ def test_a_version_move_lists_who_would_change_without_writing_anything():
 
 # The truth table: evidence -> suggestion, written by hand.  Every row is also
 # a statement about what must NOT happen (a group invented from nothing).
+# A verified review receipt is what moves a row to high; that path needs a store
+# and is proven in tests/test_w5_visual_evidence.py.  No row here can be high,
+# because a tag list is a claim about text, not a record of looking (EA-07).
 TRUTH_TABLE = [
-    ({"tags": ["cat"]}, ["animal"], "high", False),
+    ({"tags": ["cat"]}, ["animal"], "low", True),
     ({"tags": ["cute"]}, ["kawaii"], "low", True),
     ({"tags": ["dog"]}, [], "unknown", True),
     ({"tags": []}, [], "unknown", True),
-    ({"tags": ["CAT"]}, ["animal"], "high", False),
-    ({"tags": ["cat", "cute"]}, ["animal", "kawaii"], "high", False),
+    ({"tags": ["CAT"]}, ["animal"], "low", True),
+    ({"tags": ["cat", "cute"]}, ["animal", "kawaii"], "low", True),
 ]
 
 
