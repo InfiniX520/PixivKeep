@@ -2577,9 +2577,21 @@ def _parser() -> argparse.ArgumentParser:
         help="只读汇总一次关注遍历的覆盖情况（不写库、不推进游标、不改断点）",
     )
     coverage.add_argument(
-        "--database", type=Path, required=True, help="关注运行状态库（以只读方式打开）"
+        "--database",
+        type=Path,
+        required=True,
+        help="要读的库（--job 时是 library.sqlite3，--run 时是旧 crawl 状态库），以只读方式打开",
     )
-    coverage.add_argument("--run", required=True, help="要汇总的 run_id")
+    coverage.add_argument(
+        "--job",
+        default=None,
+        help="当前下载器写的 V2 任务 id（默认来源，读 library.sqlite3）",
+    )
+    coverage.add_argument(
+        "--run",
+        default=None,
+        help="旧 crawl 状态库里的 run_id（legacy 来源，需显式给出旧库路径）",
+    )
     explain_report = commands.add_parser(
         "filter-explain", parents=[_COMMON],
         help="只读解释每个候选为什么被排除、为什么判不了（不发请求、不读图库）",
@@ -3293,6 +3305,7 @@ def main(argv: list[str] | None = None) -> int:
                 ReportError,
                 coverage_lines,
                 coverage_report,
+                coverage_report_v2,
                 error_payload,
                 filter_explain_lines,
                 filter_explain_report,
@@ -3302,7 +3315,18 @@ def main(argv: list[str] | None = None) -> int:
             # read the input" and never a stand-in for "we are not sure".
             try:
                 if arguments.command == "coverage":
-                    report = coverage_report(arguments.database, arguments.run)
+                    # Exactly one task, and the flag says which store to read:
+                    # a V2 job is not a legacy run id, and guessing would make
+                    # the report describe a database nobody asked for.
+                    if bool(arguments.job) == bool(arguments.run):
+                        raise ReportError(
+                            "coverage_scope_required",
+                            "给 --job（V2 任务）或 --run（旧 crawl 状态库）之一，且只给一个",
+                        )
+                    if arguments.job:
+                        report = coverage_report_v2(arguments.database, str(arguments.job))
+                    else:
+                        report = coverage_report(arguments.database, str(arguments.run))
                     lines = coverage_lines(report)
                 else:
                     report = filter_explain_report(arguments.candidates, arguments.conditions)

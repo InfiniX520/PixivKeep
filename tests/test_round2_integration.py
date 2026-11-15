@@ -64,3 +64,38 @@ def test_verify_reports_a_tampered_copy_as_a_failed_seal(tmp_path, capsys):
     # A failed seal is a statement about the copy, not about the source: the
     # report has to name the member that no longer matches.
     assert report.get("reasons")
+
+def test_the_coverage_command_reads_a_v2_job_and_says_so(tmp_path, capsys):
+    """--job reads library.sqlite3; the report names the provider it used."""
+    from core.library_repository import LibraryRepository
+    from delivery_fixtures import Response, Transport, executor, make_job, run
+
+    logs = tmp_path / "download_logs"
+    logs.mkdir()
+    with LibraryRepository(logs / "library.sqlite3") as repository:
+        job, deliveries, _ = make_job(repository, artwork="950", count=1)
+        assert run(repository, job, deliveries[0], executor(
+            repository, logs, Transport(Response()))).state == "completed"
+    code = m.main([
+        "coverage", "--database", str(logs / "library.sqlite3"),
+        "--job", job["job_id"], "--json",
+    ])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["provider"] == "v2"
+    assert payload["coverage"]["scope"]["job_id"] == job["job_id"]
+    # The job is still open in this fixture (no batch was ever closed), so the
+    # enumeration dimension is partial and the command says 2 - a dimension is
+    # known unfinished.  Delivery is not complete either, because V2 records no
+    # expected page version; both facts have to be visible, not merged into one
+    # number.
+    assert payload["coverage"]["overall"] == "partial"
+    assert payload["coverage"]["delivery"]["state"] != "complete"
+    assert code == 2
+    assert payload["exit_code"] == 2
+
+
+def test_the_coverage_command_refuses_to_guess_which_store_to_read(capsys):
+    code = m.main(["coverage", "--database", "nowhere.sqlite3", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 3
+    assert payload["code"] == "coverage_scope_required"
