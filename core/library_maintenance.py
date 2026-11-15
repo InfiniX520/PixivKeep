@@ -2961,6 +2961,20 @@ def _decode_lines(reports: list[dict[str, object]], code: int) -> list[str]:
         # hash still reports unchanged=True.  The stability field is the
         # answer, and "we did not prove it" is a different word from "no".
         lines.append("  字节未变: %s" % _STABILITY_BYTES.get(stability, "未证明"))
+        # The human block has to say what the JSON says: this budget belongs to
+        # one file call, and an unmeasured count is 未知, never 0.
+        budget = item.get("budget") or {}
+        limits = budget.get("limits") or {}
+        spent = budget.get("bytes")
+        ceiling = limits.get("max_bytes")
+        lines.append(
+            "  预算: %s 实测%s / 上限%s"
+            % (
+                str(budget.get("scope") or "unknown"),
+                "未知" if spent is None else "%d 字节" % int(spent),
+                "未知" if ceiling is None else "%d 字节" % int(ceiling),
+            )
+        )
     if code == 0:
         lines.append("结论: 每个文件的解码都真的执行并通过。")
     elif code == 2:

@@ -131,3 +131,33 @@ def test_the_coverage_command_refuses_to_guess_which_store_to_read(capsys):
     payload = json.loads(capsys.readouterr().out)
     assert code == 3
     assert payload["code"] == "coverage_scope_required"
+def _png_chunk(kind: bytes, payload: bytes) -> bytes:
+    import struct
+    import zlib
+
+    return (
+        struct.pack(">I", len(payload))
+        + kind
+        + payload
+        + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+    )
+
+
+def test_the_decode_text_output_names_one_file_budget_not_a_command_total(tmp_path, capsys):
+    """The human block must not read like a total for the whole invocation."""
+    import zlib
+
+    image = tmp_path / "one.png"
+    image.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", bytes([0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0]))
+        + _png_chunk(b"IDAT", zlib.compress(b"\x00\x00"))
+        + _png_chunk(b"IEND", b"")
+    )
+    code = m.main(["decode-check", str(image), "--structure-only"])
+    out = capsys.readouterr().out
+    assert "预算:" in out
+    assert "file_call" in out
+    assert "command" not in out
+    assert code in (0, 2, 4, 5)
+
