@@ -176,8 +176,13 @@ def coverage_report_v2(database: Path, job_id: str) -> dict[str, Any]:
             "present" if any(versions) else "missing"
         ),
         "note": (
-            "V2 保存了应有页集合与落盘摘要，但没有保存作品页的期望内容代次；"
-            "因此交付维度只能到 unknown，不能声称本轮页面已齐"
+            "V2 保存了应有页集合与落盘摘要，并记录了作品页的期望内容代次；"
+            "交付维度按代次比对"
+            if any(versions)
+            else (
+                "V2 保存了应有页集合与落盘摘要，但没有保存作品页的期望内容代次；"
+                "因此交付维度只能到 unknown，不能声称本轮页面已齐"
+            )
         ),
     }
     if facts.get("page_gaps"):

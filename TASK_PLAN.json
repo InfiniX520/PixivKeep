@@ -1653,7 +1653,7 @@
           "strategy": "新增 core/follow_facts_v2.py（一个只读事务读 library.sqlite3）；report_commands 增加 v2 provider 与 database_changed_during_read 守卫；runtime 默认 v2、legacy 仅显式；CLI --job/--run 互斥；界面任务 ID 可留空",
           "risk": "V2 没有作品页期望代次，交付维度只能 unknown，不能假装闭合",
           "status": "已完成",
-          "verify": "-k ea04 passed；tests/test_v2_coverage_facts.py 13 例 + tests/test_round2_integration.py 7 例（含 CLI 只读证明：sha256/mtime/目录清单不变）"
+          "verify": "-k ea04 passed；tests/test_v2_coverage_facts.py 15 例 + tests/test_round2_integration.py 6 例（含 CLI 只读证明：sha256/mtime/目录清单不变）"
         },
         {
           "id": "R10-5",

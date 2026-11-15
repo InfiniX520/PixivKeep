@@ -348,8 +348,12 @@ def coverage_facts(connection: sqlite3.Connection, job_id: object) -> dict[str, 
     # Works whose decision was not "download" contribute no expected page, while
     # the counter side calls every work minus the filtered ones deliverable.
     # The two populations differ; the count travels so a report can say so.
+    # The filtered works are already the excluded_by_filter counter, so they are
+    # not part of the difference this number explains.
     facts["works_without_expected_pages"] = sum(
-        1 for item in items if str(item["decision"]) != "download"
+        1
+        for item in items
+        if str(item["decision"]) not in ("download", "filtered")
     )
     return facts
 

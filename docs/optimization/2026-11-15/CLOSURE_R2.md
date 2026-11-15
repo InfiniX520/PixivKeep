@@ -56,7 +56,8 @@
 - 代码：`core/follow_facts_v2.py`（一个只读事务读 `library.sqlite3`；期望页来自 `batch_items.required_pages_json`/`page_count`，观察摘要来自 `artifacts.sha256`）、`core/report_commands.py`（`coverage_report_v2`，provider=v2，读取期间文件变化 → `database_changed_during_read`）、`core/collection_desktop.py`（默认 V2、`job_required`、legacy 仅显式）、`core/library_maintenance.py`（`coverage --job` / `--run` 互斥）、`gui/coverage_panel.py` + `gui/collection_controller.py`（任务 ID 可留空＝用当前选中任务）。
 - 只读证明：无 `-shm/-wal` 时用 `mode=ro&immutable=1`（连索引文件都不建），有写者时用 `mode=ro` 参与锁；CLI 跑完后库文件 sha256、mtime、目录清单三者不变。
 - **重要缺口（不是本轮能闭合的）**：V2 没有保存作品页的期望内容代次。`deliveries.source_identity` 是 `sha256({illust_id,page,url,original,policy_version})` 的引用身份（`core/page_delivery.py:168`），`source_pages.content_digest` 是关注**列表页**的摘要。所以 V2 报告能给出真实的页数与已存数量，但交付维度只能 unknown（`expected_content_version_missing`）、退出码非 0。要闭合必须在采集时把作品页的期望代次写进事实，属于下一轮的数据面工作。
-- 口径差异（本轮新增说明）：报告里的「可交付作品数」按 works_seen − 被过滤 计算，而「应有页数」只统计 decision=download 的作品；两者是不同总体，不能相除。适配器把非 download 的作品数写进 `facts_notes.works_without_expected_pages` 并附 `unit_note`，未识别的 delivery 状态也以 `unmapped_delivery_states` 命名，不假装认得。\n- 证据：`-k ea04` passed；`tests/test_v2_coverage_facts.py` 13 例（含只读模式选择、库被改写时拒绝）、`tests/test_round2_integration.py` 5 例（CLI 备份整链、CLI coverage --job、CLI 只读证明）。
+- 口径差异（本轮新增说明）：报告里的「可交付作品数」按 works_seen − 被过滤 计算，而「应有页数」只统计 decision=download 的作品；两者是不同总体，不能相除。适配器把非 download 的作品数写进 `facts_notes.works_without_expected_pages` 并附 `unit_note`，未识别的 delivery 状态也以 `unmapped_delivery_states` 命名，不假装认得。
+- 证据：`-k ea04` passed；`tests/test_v2_coverage_facts.py` 13 例（含只读模式选择、库被改写时拒绝）、`tests/test_round2_integration.py` 5 例（CLI 备份整链、CLI coverage --job、CLI 只读证明）。
 
 ## EA-05 预算裁剪与游标、写回后核验
 
