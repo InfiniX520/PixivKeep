@@ -148,8 +148,11 @@ def test_step_three_the_rules_suggest_from_literal_evidence_only():
     hit = classify({"tags": ["猫", "Sky"]}, ruleset)
     # weight 2 for the cat rule beats weight 1 for the sky rule
     assert hit["groups"] == ["猫科", "风景"]
-    assert hit["confidence"] == "high"
-    assert hit["needs_more"] is False
+    # The match is strong, and that is still not a review: without a verified
+    # receipt the chain asks for more evidence (EA-07).
+    assert hit["match_strength"] == "high"
+    assert hit["confidence"] == "low"
+    assert hit["needs_more"] is True
     assert [anchor["rule_id"] for anchor in hit["anchors"]] == ["r-cat", "r-sky"]
     # the anchor keeps the tag as it was written, not the folded form
     assert hit["anchors"][1]["tags"] == ["Sky"]
@@ -196,7 +199,13 @@ def test_step_five_the_report_adds_up_and_keeps_measurement_out_of_it():
         ]
     }
     decisions = decide(before, after, plan)
-    report = build_report(batch, decisions, scope, generated_at="2026-11-15T00:00:00Z")
+    # Two artists of a three-artist group: the scope is wider than the batch,
+    # which the caller declares; the artists outside the batch are recorded.
+    report = build_report(
+        batch, decisions, scope, generated_at="2026-11-15T00:00:00Z", superset_ok=True
+    )
+    assert report["scope"]["superset"]["allowed"] is True
+    assert len(report["scope"]["superset"]["extra_artists"]) == 1
 
     assert report["counts"]["total"] == len(batch.artist_ids)
     assert sum(report["counts"]["states"].values()) == len(batch.artist_ids)
@@ -231,7 +240,7 @@ def test_step_six_an_incomplete_snapshot_is_named_and_never_passes_as_whole():
         snapshot_id="snap-1",
         group="fav",
     )
-    report = build_report(batch, [], scope)
+    report = build_report(batch, [], scope, superset_ok=True)
     assert report["proof_limits"]["coverage"] != "complete"
     assert report["proof_limits"]["coverage_note"].startswith("scope_not_complete:")
     # With no decisions every artist is undecided, and that has to be visible
@@ -249,7 +258,7 @@ def test_the_chain_does_not_mutate_what_it_was_given():
     guard_before = copy.deepcopy(before)
     guard_plan = copy.deepcopy(plan)
     assert decide(before, after, plan)
-    build_report(batch, [], scope)
+    build_report(batch, [], scope, superset_ok=True)
     assert before == guard_before
     assert plan == guard_plan
 

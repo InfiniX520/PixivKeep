@@ -131,4 +131,12 @@ AI 根据实际查看结果填写审阅 JSON。下面的 ID 和摘要只是字�
 
 退出码：`0` 输入完整且结论成立；`3` 输入不可读、参数被拒、批次/范围被改过或组名有歧义；`5` 结论依赖的证据缺失（例如快照不完整、或有画师需要人工确认）。未知一律印「未知」，不印 0。
 
+报告输入的对齐校验（2026-11-15 修复，EA-09）：
+
+- 批次里的画师必须全部落在所给范围里，缺一位就**拒绝**（退出 3，`scope_excludes_batch`），不再打一行 `covers_batch=false` 然后照样成功。
+- 范围比批次**更大**（一个组分成多批的正常情形）默认也拒绝（`scope_broader_than_batch`），要显式加 `--superset-ok`；报告会在 `scope.superset.extra_artists` 写出批次之外的画师。
+- `--rules-version`、`--account` 可选；给了就与批次记录比对，不一致即拒绝（`rules_version_mismatch` / `account_mismatch`）。批次没记录快照号时按「未知」处理，不当作矛盾。
+- 决策字段按真值表校验：`kind`、`action`、`needs_human` 互相矛盾时拒绝（`decision_action_mismatch`、`decision_needs_human_mismatch`），不再「各自枚举合法即组合合法」。
+
+
 这三条命令不产出任何写回动作：计划与报告只是给你看的证据，真正的分组写回仍由上面的 `apply --execute` 承担，且需要你在已登录的浏览器里操作。
