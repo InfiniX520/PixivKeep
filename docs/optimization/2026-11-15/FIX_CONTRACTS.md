@@ -24,7 +24,7 @@
 | `path_stability`（结束时再观察一次） ∈ `unchanged` / `changed` / `unknown` | 同一个检查函数 | `_decode_outcome` | `changed`/`unknown` **不能成功退出** |
 | 五维各带 `source` | 各维度自己 | 收据、文案 | `source=none` 时该维必须是 `capability_unavailable`/`undecided`，不得 `ok` |
 | `transport.length_matched` | 只在"预期长度与实际长度相等"时 | 收据 | 无预期或不等 → `length_mismatch`/`length_unknown` |
-| `budget.scope` | `decode_limits` 与调用方 | 全部阶段 | 作用域是**整条命令**：第一次 I/O 前检查 stop，字节/时间在阶段之间也检查 |
+| `budget.scope` | `decode_limits` 与调用方 | 全部阶段 | ~~作用域是**整条命令**~~：2026-11-15 第二轮（`S0_CONTRACTS_R2.md` §2，审计 EA-02）把它改成 **单文件调用 `file_call`**——多文件 CLI 每个文件各自一份预算并在输出里标明 scope，不许叫「整条命令总额」。原文保留作历史，当前契约以 R2 为准 |
 
 不许：`expected_size is not None` 就写匹配、旧字节通过当当前路径通过、只给最后解码阶段上预算。
 
