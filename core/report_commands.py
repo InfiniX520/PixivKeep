@@ -105,6 +105,12 @@ def coverage_report(database: Path, run_id: str) -> dict[str, Any]:
     }
 
 
+def _file_stamp(path: Path) -> tuple[int, int]:
+    """(size, mtime) of the database file, for the before/after comparison."""
+    info = path.stat()
+    return (int(info.st_size), int(info.st_mtime_ns))
+
+
 def coverage_report_v2(database: Path, job_id: str) -> dict[str, Any]:
     """Build the coverage summary for one V2 job, read-only.
 
@@ -121,6 +127,12 @@ def coverage_report_v2(database: Path, job_id: str) -> dict[str, Any]:
         connection = read_only_connection(database)
     except V2FactsError as error:
         raise ReportError(error.code, error.detail) from None
+    # A report about a file another process may be rewriting has to know whether
+    # the bytes stayed put while it read them.  A quiescent store is opened
+    # immutable (no lock, no index file), so the only defence left is to compare
+    # the file before and after: a main file that changed under the read means
+    # the numbers describe no single moment.
+    before = _file_stamp(database)
     try:
         connection.execute("BEGIN")
         facts = coverage_facts(connection, job_id)
@@ -131,6 +143,11 @@ def coverage_report_v2(database: Path, job_id: str) -> dict[str, Any]:
         raise
     finally:
         connection.close()
+    if _file_stamp(database) != before:
+        raise ReportError(
+            "database_changed_during_read",
+            "%s 在读取期间被改写；这次摘要不属于任何单一时刻" % database,
+        )
     scope = {"kind": "follow_job", "job_id": str(job_id), "provider": "v2"}
     try:
         coverage = build_coverage(facts, scope=scope)

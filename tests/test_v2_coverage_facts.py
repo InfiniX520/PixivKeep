@@ -15,7 +15,14 @@ import pytest
 
 from core.collection_desktop import DesktopRuntime
 from core.follow_coverage import build_coverage
-from core.follow_facts_v2 import V2FactsError, coverage_facts, read_only_connection
+from core.follow_facts_v2 import (
+    READ_ONLY,
+    READ_ONLY_IMMUTABLE,
+    V2FactsError,
+    coverage_facts,
+    read_only_connection,
+    read_only_mode,
+)
 from core.library_repository import LibraryRepository
 from core.report_commands import ReportError
 from delivery_fixtures import Response, Transport, executor, make_job, run
@@ -116,6 +123,41 @@ def test_reading_the_facts_neither_writes_nor_leaves_a_journal(tmp_path):
     after = (hashlib.sha256(library.read_bytes()).hexdigest(), library.stat().st_mtime_ns)
     assert after == before
     assert sorted(path.name for path in library.parent.iterdir()) == listing_before
+
+
+def test_the_read_only_mode_follows_the_evidence_on_disk(tmp_path):
+    """Quiescent store: no lock and no index file.  Live writer: take part in
+    the locking protocol instead, because a -shm already exists there."""
+    library, _ = _finished_job(tmp_path)
+    assert read_only_mode(library) == READ_ONLY_IMMUTABLE
+    (Path(str(library) + "-shm")).write_bytes(b"")
+    assert read_only_mode(library) == READ_ONLY
+
+
+def test_a_file_that_changes_between_the_two_stamps_is_refused(tmp_path, monkeypatch):
+    """The before/after comparison is wired, and it refuses rather than reports.
+
+    A concurrently rewritten main file means the numbers describe no single
+    moment; that is not a coverage verdict.  The stamp is injected here because
+    making a real writer collide inside our own read transaction would only
+    prove that SQLite takes locks.
+    """
+    from core import report_commands as commands
+
+    library, job = _finished_job(tmp_path)
+    seen = []
+    real = commands._file_stamp
+
+    def stamp(path):
+        value = real(path)
+        seen.append(value)
+        return value if len(seen) == 1 else (value[0], value[1] + 1)
+
+    monkeypatch.setattr(commands, "_file_stamp", stamp)
+    with pytest.raises(ReportError) as raised:
+        commands.coverage_report_v2(library, job["job_id"])
+    assert raised.value.code == "database_changed_during_read"
+    assert len(seen) == 2
 
 
 def test_desktop_summary_reads_the_v2_library_and_names_its_provider(tmp_path):
