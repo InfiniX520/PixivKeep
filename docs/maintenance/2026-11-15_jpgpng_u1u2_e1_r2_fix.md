@@ -30,10 +30,10 @@
 解释器 `D:\Miniconda3\envs\JuiLiu\python.exe`，`PYTHONNOUSERSITE=1`、`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`，参数 `-s -B -X utf8 -m pytest -p no:cacheprovider`，每次新 basetemp。
 
 ```
-冻结红基线（15 项）        15 tests / 0 failures      verify/merge05_frozen.xml
-整树（排除 6 个 Tk 模块）  3424 tests / 0 failed / 0 errors / 5 skipped / 758 s   verify/fullG.xml
-Tk 四模块                 118 tests / 0 failures      verify/tkF.xml
-两个 presentation 模块      9 tests / 1 error → 单条重跑 1 passed（已知 Tk 初始化现象，非产品失败）
+整树（排除 6 个 Tk 模块）  3424 tests / 0 failed / 0 errors / 5 skipped / 747 s   verify/fullI.xml   36B82711D87AE9E3
+Tk 四模块                 118 tests / 0 failed                                    verify/tkI.xml     B378D604DBD32E72
+两个 presentation 模块      9 tests / 0 failed                                    verify/presI.xml   19958B8636B12F85
+冻结红基线（15 项）        15 tests / 0 failed                                    verify/frozenH.xml AFBC78A711C9FB07
 ```
 
 ## 未做与遗留
