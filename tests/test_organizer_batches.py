@@ -12,8 +12,10 @@ import json
 import pytest
 
 from organizer.batches import (
+    AWAITING_VERIFY_STATES,
     FINAL_STATES,
     OPEN_STATES,
+    RESUMABLE_STATES,
     STATES,
     STOP_REASONS,
     ArtistCost,
@@ -181,10 +183,23 @@ def test_rebuilding_from_progress_keeps_untouched_artists_pending():
 
 
 def test_resume_returns_only_open_artists_and_never_a_finished_one():
+    """applied is resumed, verified and skipped are not.
+
+    Contract change (audit EA-05; S0_CONTRACTS_R2 section 6): applied used to
+    sit in FINAL_STATES, so a resumed run silently dropped the only artists
+    nobody had confirmed yet.  The frozen boundary test
+    test_ea05_applied_but_unverified_artist_remains_resumable pins the new
+    answer, and the old expectation is replaced here instead of being kept
+    behind an xfail.
+    """
     batch = make()
     pending = resume(batch, {"a1": "applied", "a2": "skipped", "a3": "sampled"})
-    assert pending == ("a3", "a4", "a5")
+    assert pending == ("a1", "a3", "a4", "a5")
     assert not set(pending) & set(FINAL_STATES)
+    assert not set(pending) & {"verified", "skipped"}
+    assert "applied" in AWAITING_VERIFY_STATES
+    assert "applied" not in FINAL_STATES
+    assert set(RESUMABLE_STATES) == set(OPEN_STATES) | {"applied"}
     assert set(OPEN_STATES) >= {"pending", "sampled"}
 
 
@@ -198,11 +213,20 @@ def test_progress_with_an_unknown_state_is_refused():
     assert code_of(lambda: rebuild(make(), {"a1": "mostly"})) == "progress_state_invalid"
 
 
-def test_progress_may_not_reopen_a_finished_artist():
+def test_progress_may_not_move_an_artist_backwards():
+    """applied -> sampled would queue a second write-back for an unread one.
+
+    Contract change (audit EA-05): the old rule was "a final state may not
+    change", which both locked applied and said nothing about the pipeline; the
+    rule is pipeline order now, so applied -> verified is a legal advance while
+    applied -> sampled is refused as progress_not_forward.
+    """
     batch = rebuild(make(), {"a1": "applied"})
-    assert code_of(lambda: rebuild(batch, {"a1": "sampled"})) == (
-        "progress_would_reopen_finished"
-    )
+    assert code_of(lambda: rebuild(batch, {"a1": "sampled"})) == "progress_not_forward"
+    assert code_of(lambda: rebuild(batch, {"a1": "planned"})) == "progress_not_forward"
+    assert rebuild(batch, {"a1": "verified"}).state_of("a1") == "verified"
+    finished = rebuild(make(), {"a1": "verified"})
+    assert code_of(lambda: rebuild(finished, {"a1": "applied"})) == "progress_not_forward"
 
 
 def test_a_paused_batch_becomes_complete_when_its_last_open_artist_finishes():
