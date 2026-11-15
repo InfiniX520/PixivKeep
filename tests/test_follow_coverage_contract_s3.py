@@ -49,6 +49,11 @@ def page(identity, state="saved_new", content="sha"):
     return {"page_identity": identity, "state": state, "content_sha256": content}
 
 
+def needed(identity, content="sha"):
+    """The requirement for one page: its identity *and* the version required."""
+    return {"page_identity": identity, "content_sha256": content}
+
+
 # --------------------------------------------------------------- 1. the DTO
 
 
@@ -118,7 +123,8 @@ def test_two_different_artist_work_counts_are_refused():
         (
             "one work, three pages, all delivered with a version",
             {
-                "expected": ["w#0", "w#1", "w#2"],
+                # 此用例原先按旧语义（身份集合）写成，2026-11-15 审计 EA-03 后按契约 §3 改为期望携带内容代次
+                "expected": [needed("w#0"), needed("w#1"), needed("w#2")],
                 "observed": [page("w#0"), page("w#1"), page("w#2")],
             },
             1,
@@ -137,7 +143,8 @@ def test_two_different_artist_work_counts_are_refused():
         (
             "two new pages plus one already verified",
             {
-                "expected": ["w#0", "w#1", "w#2"],
+                # 此用例原先按旧语义（身份集合）写成，2026-11-15 审计 EA-03 后按契约 §3 改为期望携带内容代次
+                "expected": [needed("w#0"), needed("w#1"), needed("w#2")],
                 "observed": [
                     page("w#0"),
                     page("w#1"),
@@ -151,7 +158,8 @@ def test_two_different_artist_work_counts_are_refused():
         ),
         (
             "everything was already verified, nothing new",
-            {"expected": ["w#0"], "observed": [page("w#0", state="already_verified")]},
+            # 此用例原先按旧语义（身份集合）写成，2026-11-15 审计 EA-03 后按契约 §3 改为期望携带内容代次
+            {"expected": [needed("w#0")], "observed": [page("w#0", state="already_verified")]},
             1,
             "complete",
             None,
@@ -175,7 +183,8 @@ def test_two_different_artist_work_counts_are_refused():
         ),
         (
             "one page observed twice with the same answer counts once",
-            {"expected": ["w#0"], "observed": [page("w#0"), page("w#0")]},
+            # 此用例原先按旧语义（身份集合）写成，2026-11-15 审计 EA-03 后按契约 §3 改为期望携带内容代次
+            {"expected": [needed("w#0")], "observed": [page("w#0"), page("w#0")]},
             1,
             "complete",
             None,
@@ -252,7 +261,8 @@ def test_a_permission_change_that_unfollows_an_artist_does_not_block():
             {"artist_id": "b", "state": "unfollowed", "works_seen": 0},
         ],
         totals={"artists_total": 2, "works_seen": 1, "excluded_by_filter": 0},
-        pages={"expected": ["w#0"], "observed": [page("w#0")]},
+        # 此用例原先按旧语义（身份集合）写成，2026-11-15 审计 EA-03 后按契约 §3 改为期望携带内容代次
+        pages={"expected": [needed("w#0")], "observed": [page("w#0")]},
     )
     states = coverage_states(payload)
     assert states["enumeration"]["state"] == "complete"
@@ -324,7 +334,11 @@ def test_chain_reaches_complete_only_with_page_evidence(tmp_path):
     repository, run = _repository(tmp_path, ["a1"])
     try:
         _finish(repository, run.run_id, {"a1": 1})
-        pages = {"expected": ["w#0", "w#1", "w#2"], "observed": [page("w#0")]}
+        # 此用例原先按旧语义（身份集合）写成，2026-11-15 审计 EA-03 后按契约 §3 改为期望携带内容代次
+        pages = {
+            "expected": [needed("w#0"), needed("w#1"), needed("w#2")],
+            "observed": [page("w#0")],
+        }
         source = StateSource(repository, run.run_id, pages=lambda run_id: pages)
         coverage = build_coverage(
             gather_facts(source), scope={"kind": "follow_run", "run_id": run.run_id}
@@ -342,7 +356,11 @@ def test_chain_is_complete_when_every_expected_page_has_a_version(tmp_path):
     repository, run = _repository(tmp_path, ["a1"])
     try:
         _finish(repository, run.run_id, {"a1": 1})
-        pages = {"expected": ["w#0", "w#1"], "observed": [page("w#0"), page("w#1")]}
+        # 此用例原先按旧语义（身份集合）写成，2026-11-15 审计 EA-03 后按契约 §3 改为期望携带内容代次
+        pages = {
+            "expected": [needed("w#0"), needed("w#1")],
+            "observed": [page("w#0"), page("w#1")],
+        }
         source = StateSource(repository, run.run_id, pages=lambda run_id: pages)
         coverage = build_coverage(
             gather_facts(source), scope={"kind": "follow_run", "run_id": run.run_id}

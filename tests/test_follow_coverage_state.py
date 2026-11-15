@@ -36,9 +36,15 @@ def page(identity="w-1#0", state="saved_new", content="sha-1"):
 
 
 def delivered(*identities):
-    """Page evidence where every given identity was delivered with a version."""
+    """Page evidence where every given identity was required *and* delivered.
+
+    此用例原先按旧语义（身份集合）写成，2026-11-15 审计 EA-03 后按契约 §3 改为期望携带内容代次：
+    expected 只给身份时无法比对内容，只能算未知，所以这里连要求一起给出。
+    """
     return {
-        "expected": list(identities),
+        "expected": [
+            {"page_identity": item, "content_sha256": "sha-1"} for item in identities
+        ],
         "observed": [page(item) for item in identities],
     }
 
@@ -209,13 +215,41 @@ def test_a_legacy_pages_saved_total_is_irrelevant_to_completeness():
 
 
 def test_a_page_without_a_content_version_is_not_delivered():
+    # 此用例原先按旧语义（身份集合）写成，2026-11-15 审计 EA-03 后按契约 §3 改为期望携带内容代次；
+    # 判据同时收紧：页面确实存了、只是证明不了版本，所以是 unknown，不是 missing。
+    states = coverage_states(
+        facts(
+            artists=[artist("a-1")],
+            pages={
+                "expected": [{"page_identity": "w-1#0", "content_sha256": "sha-1"}],
+                "observed": [page("w-1#0", content="")],
+            },
+        )
+    )
+    assert states["delivery"] == {
+        "state": "unknown",
+        "reason": "observed_content_version_missing:1",
+    }
+
+
+def test_a_page_without_any_content_version_on_either_side_is_unknown():
+    """Neither side names a version: still unknown - never missing, never complete.
+
+    missing would claim nothing was saved (something was), and complete would
+    claim the required bytes are there (nobody said which bytes were required).
+    """
     states = coverage_states(
         facts(
             artists=[artist("a-1")],
             pages={"expected": ["w-1#0"], "observed": [page("w-1#0", content="")]},
         )
     )
-    assert states["delivery"]["state"] == "missing"
+    assert states["delivery"] == {
+        "state": "unknown",
+        "reason": "expected_content_version_missing:1",
+    }
+    assert states["delivery"]["state"] != "missing"
+    assert states["delivery"]["state"] != "complete"
 
 
 def test_two_conflicting_observations_of_one_page_are_not_a_delivery():
