@@ -27,6 +27,7 @@ only answers "is this still the thing I created".
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import stat
 import time
@@ -36,6 +37,114 @@ from typing import IO
 
 #: Windows marks every reparse point (symlink, junction, mount point) with this.
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+
+#: Access right and share mode used to pin a *directory* open.  A directory
+#: handle keeps the name from being renamed or removed while it is held
+#: (measured on this host: os.rename fails with WinError 32), and it does not
+#: stop SQLite from creating its journal inside.  It must not outlive the
+#: create/write window: os.rmdir of the workspace fails while the pin is open.
+_GENERIC_READ = 0x80000000
+_FILE_SHARE_READ = 0x1
+_FILE_SHARE_WRITE = 0x2
+_OPEN_EXISTING = 3
+_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+
+
+class _WindowsDirectoryApi:
+    """The two Win32 calls a directory pin needs; built once, lazily."""
+
+    def __init__(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        class _Info(ctypes.Structure):
+            _fields_ = [
+                ("attributes", wintypes.DWORD),
+                ("created", wintypes.FILETIME),
+                ("accessed", wintypes.FILETIME),
+                ("written", wintypes.FILETIME),
+                ("volume", wintypes.DWORD),
+                ("size_high", wintypes.DWORD),
+                ("size_low", wintypes.DWORD),
+                ("links", wintypes.DWORD),
+                ("index_high", wintypes.DWORD),
+                ("index_low", wintypes.DWORD),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.CreateFileW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        kernel32.GetFileInformationByHandle.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(_Info),
+        ]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        self._ctypes = ctypes
+        self._info = _Info
+        self._kernel32 = kernel32
+        self._invalid = wintypes.HANDLE(-1).value
+
+    def open_directory(self, path: Path) -> int:
+        handle = self._kernel32.CreateFileW(
+            str(path),
+            _GENERIC_READ,
+            _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+            None,
+            _OPEN_EXISTING,
+            _FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        )
+        if handle in (None, self._invalid):
+            raise self._ctypes.WinError(self._ctypes.get_last_error())
+        return int(handle)
+
+    def key(self, handle: int):
+        """(volume serial, file index) of an open handle, or None."""
+        info = self._info()
+        if not self._kernel32.GetFileInformationByHandle(
+            int(handle), self._ctypes.byref(info)
+        ):
+            return None
+        return (int(info.volume), (int(info.index_high) << 32) | int(info.index_low))
+
+    def close(self, handle: int) -> None:
+        try:
+            self._kernel32.CloseHandle(int(handle))
+        except Exception:  # a failed close is not a reason to fail the write
+            pass
+
+
+_WINDOWS_API = None
+_WINDOWS_API_REFUSED = False
+
+
+def _windows_api():
+    """The directory API, or None when this platform has none.
+
+    None is a fact, not an error: the path-based identity check still runs, and
+    the caller records parent_pin=degraded instead of pretending the protection
+    is the same.  The failure is cached so a machine without the call does not
+    pay for the import on every claim.
+    """
+    global _WINDOWS_API, _WINDOWS_API_REFUSED
+    if _WINDOWS_API is not None:
+        return _WINDOWS_API
+    if _WINDOWS_API_REFUSED or os.name != "nt":
+        return None
+    try:
+        _WINDOWS_API = _WindowsDirectoryApi()
+    except Exception:
+        _WINDOWS_API_REFUSED = True
+        return None
+    return _WINDOWS_API
 
 
 class WorkspaceError(RuntimeError):
@@ -162,6 +271,59 @@ def verify_owned(claim: OwnershipClaim, *, handle: int | None = None) -> dict[st
     return {"state": OWNED, "reason": "", "via": "path"}
 
 
+@dataclass(frozen=True)
+class ParentPin:
+    """What was proven about the workspace directory, not what was hoped.
+
+    held      the directory handle is open: the name cannot be renamed or
+              removed while the caller creates/writes inside it.  identity says
+              how the object was compared: "handle" (GetFileInformationByHandle
+              matched the adopted key) or "path" (the handle key uses another
+              encoding here; the path identity was compared instead).
+    degraded  no system-level pin was available.  The caller still gets the
+              path identity check, but the window is wider, so the fact travels
+              into the result instead of being hidden.
+    """
+
+    state: str
+    identity: str = ""
+    error: str = ""
+
+    @property
+    def held(self) -> bool:
+        return self.state == "held"
+
+    def as_dict(self) -> dict[str, object]:
+        return {"state": self.state, "identity": self.identity, "error": self.error}
+
+
+def _volume_of(info: os.stat_result) -> int:
+    """The volume serial number inside Windows' st_dev.
+
+    CPython packs the serial into the low 32 bits and puts something else above
+    it, while BY_HANDLE_FILE_INFORMATION reports the bare serial.  Only the low
+    half may be compared; a mismatch in the high half is an encoding detail,
+    never evidence about the directory.
+    """
+    return int(getattr(info, "st_dev", 0) or 0) & 0xFFFFFFFF
+
+
+def _unlink_proven(target: Path, key: tuple[int, int]) -> None:
+    """Remove a name only while it still describes the object we created."""
+    if not key_available(key):
+        return
+    try:
+        info = os.lstat(target)
+    except OSError:
+        return
+    if is_reparse_point(info) or _key(info) != key:
+        return
+    try:
+        os.unlink(target)
+    except OSError:
+        pass
+
+
 class ClaimedFile:
     """The name this run created, together with the proof that it is still it.
 
@@ -174,9 +336,14 @@ class ClaimedFile:
     Python's os.open does not share the file for deletion, so holding the
     handle would make the name unreplaceable -- a takeover attempt would fail
     with "another program is using this file" instead of being *detected*,
-    which hides the very window this record exists to expose.  Ownership is
-    proven where it matters instead: at the write, on the descriptor that is
-    about to be written through (see writer()).
+    which hides the very window this record exists to expose.
+
+    The write takes its own capability instead.  writer() proves and truncates
+    on the descriptor for a caller that writes the bytes itself; lease() holds
+    the descriptor for a caller that hands the *name* to another program, so a
+    replacement after the proof is refused by the system and one before it is
+    caught by fstat.  Between the two, "checked" and "used" are the same
+    descriptor.
     """
 
     def __init__(self, claim: OwnershipClaim) -> None:
@@ -223,6 +390,54 @@ class ClaimedFile:
         """Does the name still point at the object this run created?"""
         return verify_owned(self._claim)
 
+    @contextlib.contextmanager
+    def lease(self):
+        """A write capability held open for as long as the write takes.
+
+        writer() is for a caller that writes the bytes itself: it truncates the
+        proven descriptor and returns it.  A caller that hands the *name* to
+        someone else -- SQLite opens the database by name -- needs the other
+        half of the same idea: prove the object on the descriptor, then keep
+        that descriptor open for the whole write.
+
+        Keeping it open is not bookkeeping.  Measured on this host, a handle
+        opened without FILE_SHARE_DELETE makes the name unreplaceable: unlink,
+        os.replace and unlink+hardlink all fail while it is held, and SQLite can
+        still open, journal and write the file.  So a replacement attempted
+        after this point fails at the system level, and one attempted before it
+        is caught here by fstat -- the claim recorded the identity, and a
+        stranger under that name does not have it.
+
+        Nothing is truncated here: the caller decides what the file should
+        contain, and an empty claimed member is what an online snapshot starts
+        from.
+        """
+        claim = self._claim
+        if not claim.provable:
+            raise WorkspaceError(
+                "claim_unprovable: %s (identity_unavailable)" % claim.path
+            )
+        flags = os.O_RDWR | getattr(os, "O_BINARY", 0)
+        try:
+            handle = os.open(claim.path, flags)
+        except FileNotFoundError:
+            raise WorkspaceError("claim_name_missing: %s" % claim.path) from None
+        except OSError as error:
+            raise WorkspaceError(
+                "claim_unwritable: %s (%s)" % (claim.path, type(error).__name__)
+            ) from None
+        state = verify_owned(claim, handle=handle)
+        if state["state"] != OWNED:
+            os.close(handle)
+            raise WorkspaceError(
+                "claim_not_owned: %s (%s)"
+                % (claim.path, state.get("reason") or state["state"])
+            )
+        try:
+            yield ClaimLease(claim, handle)
+        finally:
+            os.close(handle)
+
     def writer(self) -> IO[bytes]:
         """A writer proven to be the claimed object before anything is truncated.
 
@@ -262,6 +477,45 @@ class ClaimedFile:
                 pass
             raise
         return stream
+
+
+class ClaimLease:
+    """The held capability from ClaimedFile.lease().
+
+    It exists so a caller can name what it holds: the path to hand to SQLite,
+    the descriptor that pins it, and a verify() that re-reads the same
+    descriptor instead of the name.  The lease owns the descriptor; nothing else
+    in this module closes it.
+    """
+
+    __slots__ = ("_claim", "_handle")
+
+    def __init__(self, claim: OwnershipClaim, handle: int) -> None:
+        self._claim = claim
+        self._handle = handle
+
+    @property
+    def claim(self) -> OwnershipClaim:
+        return self._claim
+
+    @property
+    def path(self) -> Path:
+        return self._claim.path
+
+    @property
+    def name(self) -> str:
+        return self._claim.name
+
+    @property
+    def handle(self) -> int:
+        return self._handle
+
+    def verify(self) -> dict[str, object]:
+        """Is the object behind the held descriptor still the claimed one?"""
+        return verify_owned(self._claim, handle=self._handle)
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "ClaimLease(%r)" % (self._claim.path,)
 
 
 def _same(member: _Member, info: os.stat_result) -> bool:
@@ -340,6 +594,66 @@ class TemporaryWorkspace:
             raise WorkspaceError("workspace_member_invalid: %r" % (name,))
         return name
 
+    def _current_parent(self) -> os.stat_result:
+        """The directory under this workspace's path, or a typed refusal.
+
+        This is the identity check; the pin only makes it stable.  Both are
+        needed: the check alone leaves a window between "stat" and "create", and
+        the pin alone cannot say whether the directory it holds is the adopted
+        one.
+        """
+        try:
+            info = os.lstat(self.path)
+        except OSError as error:
+            raise WorkspaceError(
+                "parent_unreadable: %s (%s)" % (self.path, type(error).__name__)
+            ) from None
+        if is_reparse_point(info) or not stat.S_ISDIR(info.st_mode):
+            raise WorkspaceError(
+                "parent_replaced: %s (not a plain directory)" % self.path
+            )
+        if self._key_provable and _key(info) != self._key:
+            raise WorkspaceError("parent_replaced: %s" % self.path)
+        return info
+
+    @contextlib.contextmanager
+    def parent_pin(self):
+        """Hold the directory open while a member is created or written.
+
+        The pin is what turns "check, then use" into "check while holding".  It
+        is deliberately short-lived: an open directory handle also blocks
+        removing the directory, so discard() must never run inside it.
+        """
+        api = _windows_api()
+        handle = None
+        pin = ParentPin(state="degraded", error="platform_unavailable")
+        if api is not None:
+            try:
+                handle = api.open_directory(self.path)
+            except OSError as error:
+                pin = ParentPin(
+                    state="degraded", error="open_failed:%s" % type(error).__name__
+                )
+        if handle is None:
+            # Degraded is reported, not smoothed over: the path check still runs,
+            # so a directory that is already replaced is still refused.
+            self._current_parent()
+            yield pin
+            return
+        try:
+            info = self._current_parent()
+            identity = ""
+            key = api.key(handle)
+            if key is not None:
+                identity = (
+                    "handle"
+                    if key == (_volume_of(info), int(getattr(info, "st_ino", 0) or 0))
+                    else "path"
+                )
+            yield ParentPin(state="held", identity=identity)
+        finally:
+            api.close(handle)
+
     def claim(self, name: str, *, kind: str = "file", purpose: str = "write") -> ClaimedFile:
         """Create one member exclusively, record its identity, return its name.
 
@@ -348,39 +662,46 @@ class TemporaryWorkspace:
         cannot turn our own half-written file into an unowned stranger that has
         to be kept forever.
 
-        The name is returned, not a held handle, and that is deliberate.  On
-        this host Python's os.open does not share the file for deletion, so a
-        held handle would make the name unreplaceable: a replacement attempt
-        would fail with "another program is using this file" instead of being
-        detected, which hides the very window this record exists to expose.
-        Ownership is therefore proven where it matters -- at the write, on the
-        descriptor that is about to be written through (see _copy_and_hash).
+        The directory is pinned open across the create, so the name cannot be
+        swapped to another directory between the identity check and the open --
+        and if the pin is unavailable, the parent is re-read with the new
+        member's descriptor still open, and the member is removed again when the
+        directory under that path is no longer the adopted one.  Nothing is ever
+        created inside a directory this run did not adopt.
+
+        The creation handle is closed again immediately: holding it here would
+        make the name unreplaceable while the rest of the operation runs, which
+        would hide a takeover instead of detecting it.  The write itself takes
+        its own capability with lease(), on the descriptor that is about to be
+        written through.
         """
         name = self._valid_name(name)
         target = self.path / name
-        try:
-            parent = os.lstat(self.path)
-        except OSError as error:
-            # Without a parent identity there is no claim to make, so nothing
-            # is created: an empty file that nobody can prove is ours is worse
-            # than a typed refusal.
-            raise WorkspaceError(
-                "ownership_unavailable: %s (%s)" % (self.path, type(error).__name__)
-            ) from None
         flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
         flags |= getattr(os, "O_BINARY", 0)
-        handle = os.open(target, flags, 0o600)
-        try:
-            info = os.fstat(handle)
-        except OSError as error:
+        with self.parent_pin():
+            try:
+                handle = os.open(target, flags, 0o600)
+            except OSError as error:
+                raise WorkspaceError(
+                    "ownership_unavailable: %s (%s)" % (target, type(error).__name__)
+                ) from None
+            key = (0, 0)
+            try:
+                info = os.fstat(handle)
+                key = _key(info)
+                # With the member's own descriptor open, re-read the directory:
+                # the file just created is only this run's while the directory
+                # holding it is still the adopted one.
+                parent = self._current_parent()
+            except BaseException:
+                os.close(handle)
+                # The name was created by this run, so it may be removed again --
+                # but only while it still describes that object.  An identity the
+                # volume did not report is not proof, so nothing is removed.
+                _unlink_proven(target, key)
+                raise
             os.close(handle)
-            raise WorkspaceError(
-                "ownership_unavailable: %s (%s)" % (target, type(error).__name__)
-            ) from None
-        key = _key(info)
-        # The creation handle is closed immediately (see the docstring above);
-        # the identity taken from fstat is what proves the object later.
-        os.close(handle)
         claim = OwnershipClaim(
             path=target,
             name=name,
