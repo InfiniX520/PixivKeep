@@ -8,9 +8,12 @@ the caller asked for a strict check, the decode dimension says
 
 Three rules decide the shape of this module:
 
-* the budget is the whole command's, not the decoder's.  A stop flag that is
-  already set means no hash at all, and a file whose known size is above the
-  byte ceiling is refused before the first read rather than after four passes;
+* the budget is one file's, not the decoder's.  A stop flag that is already set
+  means no hash at all, and a file whose known size is above the byte ceiling is
+  refused before the first read rather than after four passes.  Every stage
+  charges the bytes it really read - the two hashes, the structure walk and the
+  decoder alike - and clamps each read to what is left, so the reported total is
+  the sum of the reads and not an estimate of them;
 * every answer describes one content version.  check_file() observes size and
   mtime before and after, hashes both ends when the budget allows, and says
   "changed" or "unknown" instead of handing back a verdict about bytes that are
@@ -24,6 +27,7 @@ Nothing here writes to the file.
 from __future__ import annotations
 
 import hashlib
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,8 +51,8 @@ DEFAULT_LIMITS = DecodeLimits(
     max_seconds=30.0,
 )
 
-#: The stages one command runs, in order.  The budget is entered before each
-#: one and charged after it, so a stop or a ceiling is never discovered late.
+#: The stages one file check runs, in order.  The budget is entered before each
+#: one and charged as it reads, so a stop or a ceiling is never discovered late.
 STAGES = ("observe", "version_before", "structure", "decode", "version_after")
 
 #: What path_stability may say.  changed and unknown can never be a success.
@@ -91,7 +95,8 @@ def _observe(target: Path) -> tuple[dict | None, str | None]:
     return {"size": int(info.st_size), "mtime_ns": int(info.st_mtime_ns)}, None
 
 
-def _structure(target: Path, *, expected_size, expected_media_type, stop_event):
+def _structure(target: Path, *, expected_size, expected_media_type, stop_event,
+               meter=None):
     """(evidence or None, Dimension) for the structure question."""
     try:
         evidence = inspect_image(
@@ -99,11 +104,12 @@ def _structure(target: Path, *, expected_size, expected_media_type, stop_event):
             expected_size=expected_size,
             expected_media_type=expected_media_type,
             stop_event=stop_event,
+            meter=meter,
         )
     except ImageNeedsVerification as error:
         return None, Dimension("undecided", str(getattr(error, "code", error)))
-    except ImageValidationStopped:
-        return None, Dimension("undecided", "cancel")
+    except ImageValidationStopped as error:
+        return None, Dimension("undecided", getattr(error, "reason", "cancel") or "cancel")
     except ImageValidationError as error:
         return None, Dimension("failed", str(getattr(error, "code", error)))
     except OSError as error:
@@ -137,6 +143,9 @@ def _decode(target: Path, media_type: str | None, structure_state: str, *,
                 outcome="failed",
                 seconds=None,
                 checked_at=_now(),
+                # The failure may have happened after some bytes were read, and
+                # the decoder could not finish counting: that is unknown, not 0.
+                bytes_read=None,
             )
         state = str(result.get("state") or "undecided")
         if state not in {"ok", "failed", "undecided"}:
@@ -155,6 +164,10 @@ def _decode(target: Path, media_type: str | None, structure_state: str, *,
             outcome=state,
             seconds=round(time.perf_counter() - started, 6),
             checked_at=_now(),
+            # A stopped or failed decode still read bytes before it stopped;
+            # the decoder counts them, so the budget charges what happened and
+            # not only what was completed.
+            bytes_read=_measured(result.get("bytes_read")),
         )
         return Dimension(state, result.get("reason")), receipt
     outcome = decode_with(probe_decoder(), target, policy="strict", limits=limits, stop=stop)
@@ -171,6 +184,11 @@ def _decode(target: Path, media_type: str | None, structure_state: str, *,
         outcome=outcome.decode,
         seconds=None,
         checked_at=_now(),
+        # No component was installed, so this stage provably read nothing: 0 is
+        # a measurement here.  A decoder that did run belongs to another
+        # module's accounting and did not report its bytes, so that stays
+        # unknown rather than being guessed.
+        bytes_read=0 if outcome.decode == "capability_unavailable" else None,
     )
     return Dimension(outcome.decode, outcome.reason), receipt
 
@@ -293,16 +311,16 @@ def quality_evidence(path, *, decode_policy: str = "structure", limits=None, sto
         return _refused_report(target, refused, decode_policy=decode_policy,
                                expected_size=expected_size, observed_size=size,
                                observe_error=None, command=command)
+    # The walk charges every block it really reads through this meter; charging
+    # the size the stat reported instead was an estimate, and it silently went
+    # wrong whenever the file changed between the stat and the walk.
     evidence, structure = _structure(
         target,
         expected_size=expected_size,
         expected_media_type=expected_media_type,
         stop_event=stop,
+        meter=command.meter(),
     )
-    # The structure walk reads the file once end to end; charging its measured
-    # size is what keeps the command total honest instead of counting only the
-    # decoder.
-    command.charge(size)
 
     granted = command.grant() if structure.state == "ok" else None
     if decode_policy == "structure":
@@ -325,7 +343,19 @@ def quality_evidence(path, *, decode_policy: str = "structure", limits=None, sto
                 stop=stop,
             )
             if receipt is not None:
-                command.charge(_receipt_bytes(receipt, granted))
+                spent = _receipt_bytes(receipt)
+                if spent is None:
+                    # A decoder that ran without saying how much it read leaves
+                    # the total unknown, and an unknown total may not pass.  A
+                    # decode that already failed keeps its own verdict: the
+                    # unknown total is about the budget, not about the file.
+                    command.mark_unknown("decoder_did_not_report_bytes")
+                    if decode.state == "ok":
+                        decode = Dimension("undecided", "decoder_did_not_report_bytes")
+                else:
+                    refused_charge = command.charge(spent)
+                    if refused_charge is not None:
+                        decode = Dimension("undecided", refused_charge)
 
     quality = QualityEvidence(
         source=Dimension("unknown", "provenance_not_observed"),
@@ -355,33 +385,83 @@ def quality_evidence(path, *, decode_policy: str = "structure", limits=None, sto
     }
 
 
-def _receipt_bytes(receipt: DecodeReceipt, limits: DecodeLimits) -> int:
-    """How much the decode stage read, as the decoder itself accounted it.
+def _receipt_bytes(receipt: DecodeReceipt) -> int | None:
+    """How much the decode stage read, or None when it did not say.
 
-    A receipt carries no byte count of its own (its fields are frames, pixels
-    and seconds), so the decoder is asked directly by callers that need it;
-    this helper exists so the accounting stays in one place.
+    A receipt that carries no count is not a zero-byte read: getattr(..., 0)
+    used to turn "nobody reported" into "measured nothing", which made the
+    command total look smaller than the work actually done.  None says the fact
+    is missing, and the caller turns that into an unknown total.
     """
-    return int(getattr(receipt, "bytes_read", 0) or 0)
+    value = getattr(receipt, "bytes_read", None)
+    return value if type(value) is int and value >= 0 else None
 
 
-def _sha256(path: Path) -> str:
+#: How many bytes one hash read asks for.  Small enough that a cancel set while
+#: hashing is noticed within one chunk, large enough that the per-chunk overhead
+#: stays invisible next to the hashing itself.
+_HASH_CHUNK = 256 * 1024
+
+
+def _reached_end(stream, hashed: int) -> bool:
+    """True when this open stream has no more bytes than the ones already read.
+
+    Asked only after the allowance reached zero, so it costs one fstat at the
+    boundary and never turns a spent budget into a paid-for extra read.
+    """
+    try:
+        return hashed >= os.fstat(stream.fileno()).st_size
+    except OSError:
+        return False
+
+
+def _sha256(target: Path, meter) -> tuple[str | None, str | None]:
+    """sha256 of one file read through a meter, in bounded charged chunks.
+
+    The name is the one the frozen UX-04 check wraps (q._sha256), which is why
+    a function that returns two values still carries it: that check asserts a
+    cancelled run never reaches this call at all.
+
+    Returns (digest, None), or (None, reason) when a stop flag or the byte
+    ceiling ended the read.  A partial digest is never returned: half a file is
+    not a content version, and handing one back would let a truncated read look
+    like a measurement.  A meter is mandatory - there is no unmetered read path
+    in this module any more.
+    """
     hasher = hashlib.sha256()
-    with path.open("rb") as stream:
+    hashed = 0
+    with target.open("rb") as stream:
         while True:
-            chunk = stream.read(1024 * 1024)
+            reason = meter.poll()
+            if reason is not None:
+                return None, reason
+            allowed = meter.size(_HASH_CHUNK)
+            if allowed <= 0:
+                # The ceiling is reached: asking for more would read bytes this
+                # run may not look at.  A file that ended exactly at the ceiling
+                # is the one case where nothing is missing.
+                if _reached_end(stream, hashed):
+                    break
+                return None, "bytes_limit"
+            chunk = stream.read(allowed)
             if not chunk:
                 break
+            hashed += len(chunk)
+            reason = meter.spent(len(chunk))
             hasher.update(chunk)
-    return hasher.hexdigest()
+            if reason is not None:
+                return None, reason
+    return hasher.hexdigest(), None
 
 
-def _stability(before, after, sha_before, sha_after) -> tuple[str, str]:
+def _stability(before, after, sha_before, sha_after, hash_reason=None) -> tuple[str, str]:
     """Did the path still hold the bytes that were checked?"""
     if before is None or after is None:
         return "unknown", "observation_missing"
     if sha_before is None or sha_after is None:
-        return "unknown", "hash_not_affordable"
+        # The reason the hash never finished (cancel, bytes_limit) is more
+        # useful than the flat "not affordable", which also covered a stop.
+        return "unknown", hash_reason or "hash_not_affordable"
     if sha_before != sha_after:
         return "changed", "content_changed"
     if before != after:
@@ -412,11 +492,11 @@ def check_file(path, *, decode_policy: str = "structure", limits=None, stop=None
         target.stat()
     size = None if before is None else before["size"]
     sha_before = None
+    hash_before_reason = None
     if not refused and size is not None and size <= outer.max_bytes:
         refused = command.enter("version_before")
         if not refused:
-            sha_before = _sha256(target)
-            command.charge(size)
+            sha_before, hash_before_reason = _sha256(target, command.meter())
 
     report = quality_evidence(
         target,
@@ -430,17 +510,19 @@ def check_file(path, *, decode_policy: str = "structure", limits=None, stop=None
     )
 
     sha_after = None
+    hash_after_reason = None
     if sha_before is not None and not command.refusal():
         refused = command.enter("version_after")
         if not refused:
             try:
-                sha_after = _sha256(target)
+                sha_after, hash_after_reason = _sha256(target, command.meter())
             except OSError:
                 sha_after = None
-            if sha_after is not None:
-                command.charge(size or 0)
     after, _after_error = _observe(target)
-    stability, stability_reason = _stability(before, after, sha_before, sha_after)
+    stability, stability_reason = _stability(
+        before, after, sha_before, sha_after,
+        hash_before_reason or hash_after_reason,
+    )
 
     # unchanged keeps its historical meaning - this run did not observe the path
     # change - so a check that could not afford both hashes still answers False

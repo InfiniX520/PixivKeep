@@ -387,7 +387,9 @@ def test_an_apng_is_reported_unsupported():
 
 def test_command_budget_charges_stages_and_hands_out_the_remainder():
     budget = CommandBudget(DecodeLimits(max_bytes=100, max_seconds=60.0))
-    assert budget.scope == "command"
+    # S0_CONTRACTS_R2 section 2: one check_file call covers one file, so the
+    # label says file_call.  It never meant a whole multi-file command.
+    assert budget.scope == "file_call"
     assert budget.enter("observe") is None
     assert budget.charge(40) is None
     grant = budget.grant()
@@ -406,11 +408,14 @@ def test_a_stop_before_the_first_read_means_no_hash_at_all(tmp_path, monkeypatch
     stop = threading.Event()
     stop.set()
     calls = []
+    # The hash is metered now: it reads in bounded chunks charged to the file
+    # budget, so the call being counted takes the meter.  The assertion is
+    # unchanged: no stop-set run may hash anything.
     original = quality_check._sha256
 
-    def counted(target):
+    def counted(target, meter):
         calls.append(target)
-        return original(target)
+        return original(target, meter)
 
     monkeypatch.setattr(quality_check, "_sha256", counted)
     report = quality_check.check_file(path, decode_policy="strict", stop=stop)
@@ -449,7 +454,7 @@ def test_the_receipt_reports_the_whole_command_spend_not_just_the_decoder(tmp_pa
     size = path.stat().st_size
     report = quality_check.check_file(path, decode_policy="strict")
     budget = report["budget"]
-    assert budget["scope"] == "command"
+    assert budget["scope"] == "file_call"
     # observe, version_before, structure, decode, version_after
     assert budget["stages"] == ["observe", "version_before", "structure", "decode",
                                 "version_after"]
@@ -559,7 +564,7 @@ def test_the_time_ceiling_is_checked_between_stages(tmp_path, monkeypatch):
     # ceiling forbids is the next stage, and that is what the report says.
     assert report["quality"]["structure"]["state"] == "ok"
     assert report["quality"]["decode"] == {"state": "undecided", "reason": "time_limit"}
-    assert report["budget"]["scope"] == "command"
+    assert report["budget"]["scope"] == "file_call"
 
 
 # --- UX-03: one content version, one comparison ----------------------------
