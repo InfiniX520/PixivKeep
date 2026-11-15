@@ -13,7 +13,7 @@ What the module proves, in order of the write:
 * the directory is pinned while a member is created, so a swapped directory
   gets no member and no leftover;
 * only members this run created are cleaned up; a stranger beside them is
-  kept and named;
+  kept and named, including when the target cannot be opened or closed;
 * cancellation is a typed failure, never a silent success.
 """
 import contextlib
@@ -234,7 +234,8 @@ def test_foreign_sidecar_is_kept_and_named(tmp_path, monkeypatch):
     assert created[0].read_bytes() == b"foreign frame"
 
 
-def test_failure_inside_the_lease_cleans_only_its_own_members(tmp_path, monkeypatch):
+def test_backup_failure_inside_the_lease_cleans_only_its_own_members(tmp_path, monkeypatch):
+    """The SQLite copy itself fails: the stranger stays, our member does not."""
     source = helpers.make_library(tmp_path / "source" / "library.sqlite3", jobs=1)
     original = TemporaryWorkspace.claim
     stranger = []
@@ -247,28 +248,131 @@ def test_failure_inside_the_lease_cleans_only_its_own_members(tmp_path, monkeypa
             stranger.append(outsider)
         return result
 
-    real = m._connect_readonly
-    calls = []
+    class Origin:
+        """A real source connection whose copy step fails, inside the lease."""
 
-    def boom(path, snapshot=True):
-        # The preflight inspection opens the source too; only the copy stage is
-        # made to fail, so the failure really happens inside the lease.
-        calls.append(str(path))
-        if len(calls) > 1:
-            raise sqlite3.OperationalError("synthetic source failure")
-        return real(path, snapshot=snapshot)
+        def __init__(self, connection):
+            self._connection = connection
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+        def close(self):
+            self._connection.close()
+
+        def backup(self, destination, pages=-1, progress=None):
+            raise sqlite3.OperationalError("synthetic backup failure")
+
+    real = m._connect_readonly
+
+    def connect(source_path, snapshot=True):
+        return Origin(real(source_path, snapshot=snapshot))
 
     monkeypatch.setattr(TemporaryWorkspace, "claim", claim)
-    monkeypatch.setattr(m, "_connect_readonly", boom)
+    monkeypatch.setattr(m, "_connect_readonly", connect)
     with pytest.raises(m.BackupError) as caught:
         m.backup_library(source, tmp_path / "backups", label="online", mode="online_backup")
     assert caught.value.code == "backup_failed"
-    assert "synthetic source failure" in caught.value.detail
+    assert "synthetic backup failure" in caught.value.detail
     cleanup = caught.value.cleanup
     assert cleanup["state"] != "ok"
     assert {"name": "stranger.bin", "reason": "unowned"} in cleanup["kept"]
     assert stranger[0].read_bytes() == b"not ours"
     assert not (stranger[0].parent / "library.sqlite3").exists(), "our own member must be gone"
+
+
+class _TargetFails:
+    """The sqlite3 module, except that the backup target cannot be opened.
+
+    The source keeps the real connection: the failure has to happen on the
+    target side, after the claim and the lease, which is where the audit's
+    "connect fails" case lives.
+    """
+
+    def __init__(self, source):
+        self.source = Path(source).resolve()
+
+    def __getattr__(self, name):
+        return getattr(sqlite3, name)
+
+    def _is_source(self, path):
+        text = str(path)
+        if text.startswith("file:"):  # the read-only URI _connect_readonly builds
+            return True
+        return Path(text).resolve() == self.source
+
+    def connect(self, path, *args, **options):
+        if self._is_source(path):
+            return sqlite3.connect(path, *args, **options)
+        raise sqlite3.OperationalError("synthetic target connect failure")
+
+
+class _CloseFails(sqlite3.Connection):
+    """A real connection whose close() reports a failure after releasing."""
+
+    def close(self):
+        super().close()
+        raise OSError("synthetic close failure")
+
+
+class _TargetCloseFails(_TargetFails):
+    def connect(self, path, *args, **options):
+        if self._is_source(path):
+            return sqlite3.connect(path, *args, **options)
+        options.pop("factory", None)
+        return sqlite3.connect(path, *args, factory=_CloseFails, **options)
+
+
+def _claiming_with_a_stranger(tmp_path):
+    """A claim hook that plants one foreign file beside the target."""
+    original = TemporaryWorkspace.claim
+    stranger = []
+
+    def claim(self, name, **options):
+        result = original(self, name, **options)
+        if options.get("purpose") == "online_snapshot":
+            assert _inside(result.path, tmp_path)
+            outsider = self.path / "stranger.bin"
+            outsider.write_bytes(b"not ours")
+            stranger.append(outsider)
+        return result
+
+    return claim, stranger
+
+
+def test_target_connect_failure_is_typed_and_publishes_nothing(tmp_path, monkeypatch):
+    source = helpers.make_library(tmp_path / "source" / "library.sqlite3", jobs=1)
+    claim, stranger = _claiming_with_a_stranger(tmp_path)
+    monkeypatch.setattr(TemporaryWorkspace, "claim", claim)
+    monkeypatch.setattr(m, "sqlite3", _TargetFails(source))
+    with pytest.raises(m.BackupError) as caught:
+        m.backup_library(source, tmp_path / "backups", label="online", mode="online_backup")
+    assert isinstance(caught.value, m.LibraryMaintenanceError)
+    assert caught.value.code == "backup_failed"
+    assert "synthetic target connect failure" in caught.value.detail
+    cleanup = caught.value.cleanup
+    assert cleanup["state"] != "ok"
+    assert {"name": "stranger.bin", "reason": "unowned"} in cleanup["kept"]
+    assert stranger[0].read_bytes() == b"not ours"
+    assert not (stranger[0].parent / "library.sqlite3").exists(), "our own member must be gone"
+    assert list((tmp_path / "backups").rglob("manifest.json")) == []
+
+
+def test_target_close_failure_propagates_and_publishes_nothing(tmp_path, monkeypatch):
+    source = helpers.make_library(tmp_path / "source" / "library.sqlite3", jobs=1)
+    claim, stranger = _claiming_with_a_stranger(tmp_path)
+    monkeypatch.setattr(TemporaryWorkspace, "claim", claim)
+    monkeypatch.setattr(m, "sqlite3", _TargetCloseFails(source))
+    with pytest.raises(m.BackupError) as caught:
+        m.backup_library(source, tmp_path / "backups", label="online", mode="online_backup")
+    assert caught.value.code == "backup_failed"
+    assert "synthetic close failure" in caught.value.detail
+    cleanup = caught.value.cleanup
+    assert cleanup["state"] != "ok"
+    assert {"name": "stranger.bin", "reason": "unowned"} in cleanup["kept"]
+    assert stranger[0].read_bytes() == b"not ours"
+    assert not (stranger[0].parent / "library.sqlite3").exists(), "our own member must be gone"
+    assert list((tmp_path / "backups").rglob("manifest.json")) == []
 
 
 class _FlipStop:
