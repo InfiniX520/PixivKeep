@@ -135,6 +135,7 @@ AI 根据实际查看结果填写审阅 JSON。下面的 ID 和摘要只是字�
 
 - 批次里的画师必须全部落在所给范围里，缺一位就**拒绝**（退出 3，`scope_excludes_batch`），不再打一行 `covers_batch=false` 然后照样成功。
 - 范围比批次**更大**（一个组分成多批的正常情形）默认也拒绝（`scope_broader_than_batch`），要显式加 `--superset-ok`；报告会在 `scope.superset.extra_artists` 写出批次之外的画师。
+- **空批次（0 位画师）的报告同样要 `--superset-ok`**：范围确实比批次大，这条规则不因「没有人要报告」而豁免。批次被预算裁到 0 人（`stop_reason=capacity_zero`）时就会走到这里。
 - `--rules-version`、`--account` 可选；给了就与批次记录比对，不一致即拒绝（`rules_version_mismatch` / `account_mismatch`）。批次没记录快照号时按「未知」处理，不当作矛盾。
 - 决策字段按真值表校验：`kind`、`action`、`needs_human` 互相矛盾时拒绝（`decision_action_mismatch`、`decision_needs_human_mismatch`），不再「各自枚举合法即组合合法」。
 
