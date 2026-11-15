@@ -179,6 +179,12 @@ class DecodeReceipt:
     outcome: str
     seconds: float | None
     checked_at: str
+    #: How many bytes the decoder itself took off the stream, including the
+    #: bytes it had already read when it stopped.  None means the decoder did
+    #: not report it: the caller's budget is then unknown, never "zero read".
+    #: It defaults to None so a receipt built elsewhere stays buildable and
+    #: reads as "not reported" instead of claiming a measurement.
+    bytes_read: int | None = None
 
     def __post_init__(self) -> None:
         _text(self.format, code="receipt_field_invalid", what="format")
@@ -206,6 +212,11 @@ class DecodeReceipt:
             if type(self.seconds) not in (int, float) or self.seconds < 0:
                 raise QualityEvidenceError("receipt_field_invalid", "seconds=%r" % (self.seconds,))
             object.__setattr__(self, "seconds", float(self.seconds))
+        if self.bytes_read is not None:
+            if type(self.bytes_read) is not int or self.bytes_read < 0:
+                raise QualityEvidenceError(
+                    "receipt_field_invalid", "bytes_read=%r" % (self.bytes_read,)
+                )
         _text(self.checked_at, code="receipt_field_invalid", what="checked_at")
 
     def as_dict(self) -> dict[str, Any]:
@@ -218,6 +229,7 @@ class DecodeReceipt:
             "outcome": self.outcome,
             "seconds": self.seconds,
             "checked_at": self.checked_at,
+            "bytes_read": self.bytes_read,
         }
 
     @classmethod
@@ -234,8 +246,12 @@ class DecodeReceipt:
             "seconds",
             "checked_at",
         }
+        # bytes_read arrived after the first receipts were written, so an old
+        # dump without it is still readable and means "the decoder did not
+        # report", not "zero bytes".
+        optional = {"bytes_read"}
         missing = sorted(expected - set(value))
-        extra = sorted(set(value) - expected)
+        extra = sorted(set(value) - expected - optional)
         if missing or extra:
             raise QualityEvidenceError(
                 "receipt_shape_invalid", "missing=%s extra=%s" % (missing, extra)
@@ -249,4 +265,5 @@ class DecodeReceipt:
             outcome=value["outcome"],
             seconds=value["seconds"],
             checked_at=value["checked_at"],
+            bytes_read=value.get("bytes_read"),
         )

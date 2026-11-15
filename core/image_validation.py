@@ -28,7 +28,17 @@ class ImageNeedsVerification(ImageValidationError):
 
 
 class ImageValidationStopped(InterruptedError):
-    pass
+    """The walk ended early because of a stop flag or a spent read budget.
+
+    The reason travels with the exception: "cancel" and "bytes_limit" both mean
+    "this run may not look further", but only one of them is the caller's stop
+    and the report has to name which.  The default keeps every existing
+    `raise ImageValidationStopped()` correct.
+    """
+
+    def __init__(self, reason: str = "cancel") -> None:
+        self.reason = str(reason)
+        super().__init__(self.reason)
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,13 +53,33 @@ class ImageEvidence:
 
 
 class _Reader:
-    def __init__(self, stream, stop, max_chunks):
+    def __init__(self, stream, stop, max_chunks, meter=None):
         self.stream, self.stop = stream, stop
         self.buffer, self.offset = b"", 0
         self.position, self.steps, self.max_chunks = 0, 0, max_chunks
         self.hasher = hashlib.sha256()
+        #: Optional budget view (core.decode_limits.ReadMeter).  The walk owns
+        #: no ceiling of its own: when a meter is given, the read size is
+        #: clamped by it and every block is charged to the caller's budget.
+        self.meter = meter
+
+    def _at_end(self):
+        """True when this file has no more bytes; only asked when the meter is spent.
+
+        A budget that ends exactly with the file must not turn the EOF probe
+        into "bytes_limit": the caller paid for every byte, and asking the
+        stream for one more block is how the walk learns there are none.
+        """
+        try:
+            return self.position >= os.fstat(self.stream.fileno()).st_size
+        except OSError:
+            return False
 
     def check(self):
+        if self.meter is not None:
+            reason = self.meter.poll()
+            if reason is not None:
+                raise ImageValidationStopped(reason)
         if self.stop is not None and self.stop.is_set():
             raise ImageValidationStopped()
         self.steps += 1
@@ -59,9 +89,23 @@ class _Reader:
     def fill(self):
         if self.offset == len(self.buffer):
             self.check()
-            self.buffer = self.stream.read(_BLOCK)
+            amount = _BLOCK
+            if self.meter is not None:
+                amount = self.meter.size(_BLOCK)
+                if amount <= 0:
+                    # "no allowance left" is not end-of-file: an empty buffer
+                    # here would be reported as a truncated image.  A file that
+                    # ends exactly at the ceiling is the one exception.
+                    if self._at_end():
+                        return False
+                    raise ImageValidationStopped("bytes_limit")
+            self.buffer = self.stream.read(amount)
             self.offset = 0
             self.hasher.update(self.buffer)
+            if self.meter is not None and self.buffer:
+                reason = self.meter.spent(len(self.buffer))
+                if reason is not None:
+                    raise ImageValidationStopped(reason)
         return self.offset < len(self.buffer)
 
     def take(self, amount):
@@ -373,7 +417,8 @@ def _webp(reader, size):
 
 
 def inspect_image(path: str | Path, *, expected_size=None, expected_media_type=None,
-                  stop_event=None, max_file_bytes=(1 << 32), max_chunks=1_000_000) -> ImageEvidence:
+                  stop_event=None, max_file_bytes=(1 << 32), max_chunks=1_000_000,
+                  meter=None) -> ImageEvidence:
     """Inspect an owned staging file, preserving its bytes and bounding memory.
 
     ``structure_checked`` does not mean JPEG/GIF/WebP pixel streams were
@@ -389,7 +434,7 @@ def inspect_image(path: str | Path, *, expected_size=None, expected_media_type=N
             raise ImageNeedsVerification("image_size_limit")
         if expected_size is not None and before.st_size != expected_size:
             raise ImageValidationError("image_size_mismatch")
-        reader = _Reader(stream, stop_event, max_chunks)
+        reader = _Reader(stream, stop_event, max_chunks, meter)
         reader.fill()
         prefix = reader.buffer[:12]
         if prefix.startswith(_PNG):

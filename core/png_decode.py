@@ -80,7 +80,12 @@ class _Source:
         remaining = amount
         while remaining:
             _poll(self.budget, self.stop)
-            piece = self.stream.read(remaining)
+            # Clamp before asking: a read that overshoots is already spent by
+            # the time it could be charged, and the stream cannot give it back.
+            allowed = self.budget.read_size(remaining)
+            if allowed <= 0:
+                raise _Halt("undecided", "bytes_limit")
+            piece = self.stream.read(allowed)
             if not piece:
                 raise _Halt("failed", "truncated")
             reason = self.budget.check_bytes(len(piece))
