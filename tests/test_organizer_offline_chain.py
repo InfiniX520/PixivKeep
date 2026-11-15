@@ -13,7 +13,7 @@ from __future__ import annotations
 import copy
 import json
 
-from organizer.batches import plan_batch, resume
+from organizer.batches import advance, plan_batch, resume
 from organizer.conflicts import decide, writes_for
 from organizer.group_scope import build_scope
 from organizer.report import build_report, report_json
@@ -258,6 +258,23 @@ def test_resume_after_a_pause_returns_only_unfinished_members():
     scope = build_scope(snapshot(), groups=["fav"])
     batch = plan_batch(scope.artist_ids, account_id="acct-1", artists=2, requests=2)
     first = batch.artist_ids[0]
-    # "applied" is a final state, so the first artist is no longer owed.
-    assert resume(batch, {first: "applied"}) == (batch.artist_ids[1],)
+    # applied still owes its verification, so the resumed run keeps it; only a
+    # read-back (verified) or an explicit skip takes an artist out of the set.
+    # Contract change, audit EA-05.
+    assert resume(batch, {first: "applied"}) == (first, batch.artist_ids[1])
+    assert resume(batch, {first: "verified"}) == (batch.artist_ids[1],)
+    assert resume(batch, {first: "skipped"}) == (batch.artist_ids[1],)
     assert resume(batch, {}) == batch.artist_ids
+
+    # "still resumable" must not be read as "resumable forever": the artist
+    # leaves the set as soon as the read-back lands, which is the other half of
+    # the same rule.  advance() is used here so the sequence is the real one,
+    # not a hand-written state.
+    walked = batch
+    for event in ("sample", "review", "plan", "apply"):
+        walked = advance(walked, first, event)
+    assert walked.state_of(first) == "applied"
+    assert first in resume(walked, {})
+    read_back = advance(walked, first, "verify")
+    assert read_back.state_of(first) == "verified"
+    assert resume(read_back, {}) == (batch.artist_ids[1],)
