@@ -26,11 +26,11 @@ from gui.collection_theme import scale_px
 # a failed read is its own state, not an empty result.
 LOAD_STATES = ("idle", "loading", "ready", "error")
 
-IDLE_TEXT = "尚未读取：还没有可显示的关注运行。"
+IDLE_TEXT = "尚未读取：选择任务后点「读取」，留空则用当前选中的任务。"
 LOADING_TEXT = "正在读取覆盖摘要…"
 EMPTY_TEXT = "这次运行没有可显示的摘要行。"
 ERROR_TEXT = "读取没有完成；原因：%s"
-HEADER_TEXT = "运行 %s 的覆盖摘要"
+HEADER_TEXT = "任务 %s 的覆盖摘要"
 HEADER_PLAIN = "覆盖摘要"
 
 
@@ -83,7 +83,7 @@ class CoveragePanel(ttk.Frame):
         bar = ttk.Frame(self, style="CollectionPage.TFrame")
         bar.grid(row=0, column=0, sticky="ew", pady=(s(8), s(6)))
         bar.columnconfigure(1, weight=1)
-        self._run_label = ttk.Label(bar, text="运行 ID", style="CollectionMuted.TLabel")
+        self._run_label = ttk.Label(bar, text="任务 ID", style="CollectionMuted.TLabel")
         self._run_label.grid(row=0, column=0, sticky="w")
         self._run_entry = ttk.Entry(bar)
         self._run_entry.grid(row=0, column=1, sticky="ew", padx=(s(8), s(8)))
@@ -120,9 +120,9 @@ class CoveragePanel(ttk.Frame):
             run_id = self._run_entry.get().strip()
         except tk.TclError:  # pragma: no cover - widget going away
             return
-        if not run_id:
-            self.set_error("还没有填运行 ID")
-            return
+        # An empty box is a legitimate request: the controller then answers for
+        # the task the user has selected.  A summary is about one task, and
+        # asking the user to copy an internal id invites the wrong one.
         if self._on_action is not None:
             self._on_action("coverage_load", {"run_id": run_id})
 

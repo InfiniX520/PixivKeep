@@ -764,7 +764,8 @@ class CollectionController:
             elif action=='verification_batch':
                 self._recover_verification(list(payload.get('keys') or ()))
             elif action=='coverage_load':
-                self._load_coverage(str(payload.get('run_id') or '').strip())
+                self._load_coverage(str(payload.get('run_id') or '').strip()
+                             or (self._current_job or ''))
             elif action=='record_next' and self._record_next:
                 self._record_cursors.append(self._record_next); self._record_version+=1; self._query_records()
             elif action=='record_previous' and len(self._record_cursors)>1:
@@ -894,11 +895,14 @@ class CollectionController:
         if self.runtime is None:
             return
         if not run_id:
-            self.view.set_coverage_error('需要一次关注运行的 ID')
+            self.view.set_coverage_error('先选择一个任务，或填写任务 ID')
             return
         self.view.set_coverage_loading()
+        # The summary is about a task, so the request carries the task id the
+        # user selected; the runtime decides which store answers (V2 by
+        # default, the legacy crawl store only when asked for it).
         self._watch('coverage_summary',
-            self.runtime.coverage_summary(run_id=run_id),
+            self.runtime.coverage_summary(job_id=run_id),
             lambda value: self._coverage_ready(value, run_id))
 
     def _coverage_ready(self, value, run_id: str) -> None:
