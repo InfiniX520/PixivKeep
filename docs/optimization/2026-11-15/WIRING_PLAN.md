@@ -13,9 +13,14 @@
 新增两个子命令，**只读**，都支持 `--json`：
 
 ```text
-maintain.py coverage --database <library.sqlite3> --run <run_id> [--json]
+maintain.py coverage --database <library.sqlite3>          --job <job_id> [--json]   # V2 任务（默认来源）
+maintain.py coverage --database <follow_crawl_state.sqlite3> --run <run_id> [--json]  # 旧 crawl 状态库（legacy）
 maintain.py filter-explain --candidates <file.jsonl> --conditions <file.json> [--json]
 ```
+
+2026-11-15 第二轮修复（EA-04）后：`--job` 读当前下载器写的 V2 库，`--run` 读旧 crawl 状态库；两者必须且只能给一个，
+否则 `coverage_scope_required` / 退出 3——不让命令替用户猜该读哪个库。输出新增 `provider` 字段（`v2` / `legacy`），
+文本行也会写明数据来源。
 
 退出码（与既有维护命令一致的口径：结论不成立就不许 0）：
 
@@ -30,12 +35,14 @@ maintain.py filter-explain --candidates <file.jsonl> --conditions <file.json> [-
 
 ## 2. 两个命令读到的东西
 
-- `coverage`：`FollowCrawlStateRepository`（只读打开）→ `StateSource` → `gather_facts` → `build_coverage` → `text()`。**不写库、不推进游标、不改断点**。数据库以只读方式打开；拿不到就是退出码 3，不许当"空运行"。
+- `coverage`（V2，默认）：`core.follow_facts_v2.coverage_facts`（一个只读事务读 `library.sqlite3`）→ `build_coverage` → `text()`。期望页集合来自 `batch_items.required_pages_json`/`page_count`，观察摘要来自 `artifacts.sha256`；**V2 没有保存作品页的期望内容代次**，所以交付维度只能到 unknown（原因 `expected_content_version_missing`），不是报告逻辑的问题。
+- `coverage`（legacy，需显式 `--run`）：`FollowCrawlStateRepository`（只读打开）→ `StateSource` → `gather_facts` → `build_coverage` → `text()`。
+- 两条路径都**不写库、不推进游标、不改断点**；只读模式按盘上证据选（有 `-shm/-wal` 用 `mode=ro` 参与锁，否则 `mode=ro&immutable=1` 连索引文件都不建）。拿不到库就是退出码 3，不许当"空运行"。
 - `filter-explain`：读候选 JSONL（每行一个候选对象，键同 `ArtworkMetadata`）与条件 JSON（`min_bookmarks`/`exclude_ai`），逐行 `explain()`，输出每行的 `verdict` 与 `reasons`（含 code/field/evidence/unknown）。**不发 HTTP、不读图库**。
 
 ## 3. 界面（第二步，本轮只冻结形状）
 
-- 只读面板：显示 `coverage` 的 §4 文案 + 三维状态 + 未知项清单；不提供"重算/清理"按钮。
+- 只读面板：显示 `coverage` 的 §4 文案 + 三维状态 + 未知项清单；不提供"重算/清理"按钮。输入框是「任务 ID」，可留空＝用当前选中任务（2026-11-15 第二轮 EA-04 之后），不再要求用户去旧库抄 run_id。
 - 界面线程只调用已经算好的结果（主线程算完再投递），不在 Tk 回调里做哈希或解码。
 - 每个 Tk 模块单独一个进程跑测试；沿用既有 `test_collection_*` 的隔离方式。
 
