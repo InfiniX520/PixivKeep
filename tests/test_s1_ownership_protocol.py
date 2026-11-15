@@ -216,8 +216,8 @@ def test_a_primary_failure_keeps_its_cleanup_as_a_separate_field(tmp_path, monke
     library = make_library(tmp_path / "lib" / "library.sqlite3", jobs=1)
     real_copy = m._file_group_copy
 
-    def copy_and_plant(source, target, group, workspace):
-        facts = real_copy(source, target, group, workspace)
+    def copy_and_plant(source, target, group, workspace, *, stop=None):
+        facts = real_copy(source, target, group, workspace, stop=stop)
         (workspace.path / "stranger.bin").write_bytes(b"planted by nobody")
         return facts
 
@@ -240,8 +240,8 @@ def test_the_cli_prints_the_cleanup_beside_the_failure(tmp_path, monkeypatch, ca
     library = make_library(tmp_path / "lib" / "library.sqlite3", jobs=1)
     real_copy = m._file_group_copy
 
-    def copy_and_plant(source, target, group, workspace):
-        facts = real_copy(source, target, group, workspace)
+    def copy_and_plant(source, target, group, workspace, *, stop=None):
+        facts = real_copy(source, target, group, workspace, stop=stop)
         (workspace.path / "stranger.bin").write_bytes(b"planted by nobody")
         return facts
 

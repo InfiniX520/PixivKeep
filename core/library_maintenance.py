@@ -62,6 +62,7 @@ from core.task_contracts import ContractError
 from core.workspace_ownership import (
     OWNED,
     OwnershipClaim,
+    ParentPin,
     TemporaryWorkspace,
     WorkspaceError,
     verify_owned,
@@ -810,8 +811,56 @@ def restore_check(path: str | Path) -> dict[str, object]:
     }
 
 
+def _stop_requested(stop: object) -> bool:
+    """Did the caller ask this run to stop?
+
+    An Event, a callable and a plain truth value are all accepted, because the
+    maintenance CLI, the tests and a future UI thread each have their own
+    natural shape; none of them may be silently ignored.
+    """
+    if stop is None:
+        return False
+    checker = getattr(stop, "is_set", None)
+    if callable(checker):
+        return bool(checker())
+    if callable(stop):
+        return bool(stop())
+    return bool(stop)
+
+
+def _stop_check(stop: object, stage: str) -> None:
+    if _stop_requested(stop):
+        raise BackupError("backup_cancelled", "stopped before %s" % (stage,))
+
+
+def _progress_guard(stop: object):
+    """A backup progress callback that aborts the copy when asked to stop."""
+    if stop is None:
+        return None
+
+    def progress(status, remaining, total):  # noqa: ANN001 - SQLite's shape
+        if _stop_requested(stop):
+            raise BackupError("backup_cancelled", "stopped during the online snapshot")
+        return None
+
+    return progress
+
+
+#: Workspace refusals that mean "the name no longer describes our member".
+_TARGET_REFUSALS = frozenset({"claim_not_owned", "claim_name_missing"})
+#: A volume that reports no identity: nothing is written, and it is not the
+#: same fact as a replacement.
+_TARGET_UNPROVABLE = "claim_unprovable"
+#: Workspace refusals that mean "the directory is not the adopted one".
+_WORKSPACE_REFUSALS = frozenset({"parent_replaced", "parent_unreadable"})
+
+
 def _online_snapshot(
-    source: Path, target: Path, workspace: TemporaryWorkspace
+    source: Path,
+    target: Path,
+    workspace: TemporaryWorkspace,
+    *,
+    stop: object = None,
 ) -> list[dict[str, object]]:
     """Consistent snapshot through the SQLite online backup API.
 
@@ -820,33 +869,63 @@ def _online_snapshot(
     writer's uncommitted rows are not part of the snapshot, and a source that
     is mid-commit still yields one consistent state.  The source is never
     checkpointed, journalled or written.
+
+    The target is claimed exclusively, then *leased*: the descriptor is opened
+    and compared with the claimed identity, and it stays open until SQLite has
+    finished writing.  Measured on this host, that descriptor makes the name
+    unreplaceable (unlink, os.replace and unlink+hardlink all fail) while SQLite
+    can still open, journal and write the file.  A replacement attempted before
+    the lease is caught by the fstat comparison and nothing is written; one
+    attempted afterwards is refused by the system.  Verifying after the write,
+    as the previous version did, could only report the damage.
     """
-    # The target is created by this run, exclusively, before SQLite touches it:
-    # SQLite writes by name, so the claim is what proves afterwards that the
-    # file it wrote is the file this run made.  The handle is dropped before
-    # SQLite takes the file over; the recorded identity is enough.
-    workspace.claim(target.name, purpose="online_snapshot")
-    destination = sqlite3.connect(
-        str(target), timeout=_READ_TIMEOUT_SECONDS, isolation_level=None
-    )
+    claim = workspace.claim(target.name, purpose="online_snapshot")
+    pin = ParentPin(state="unknown", identity="", error="not_observed")
     try:
-        with contextlib.closing(_connect_readonly(source, snapshot=False)) as origin:
-            origin.backup(destination)
-        # Pages are copied verbatim, so the snapshot inherits the source's
-        # journal header.  A restored backup must never depend on a -wal that
-        # belongs to a different file, so the snapshot is normalised into one
-        # self-contained rollback-journal database.
-        destination.execute("PRAGMA journal_mode=DELETE")
-    finally:
-        destination.close()
-    owned = workspace.verify_member(target.name)
-    if owned["state"] != "owned":
-        # Another object took the name while SQLite wrote: the bytes in the
-        # snapshot belong to a file this run did not create.
-        raise BackupError("snapshot_target_replaced", str(target))
-    # The snapshot is complete now: record its final size and time so a later
-    # cleanup can tell an unfinished copy from this finished one.
-    workspace.record(target.name)
+        with workspace.parent_pin() as pin:
+            with claim.lease() as lease:
+                _stop_check(stop, "online_backup")
+                destination = sqlite3.connect(
+                    str(target), timeout=_READ_TIMEOUT_SECONDS, isolation_level=None
+                )
+                try:
+                    with contextlib.closing(
+                        _connect_readonly(source, snapshot=False)
+                    ) as origin:
+                        origin.backup(
+                            destination, pages=256, progress=_progress_guard(stop)
+                        )
+                    # Pages are copied verbatim, so the snapshot inherits the
+                    # source's journal header.  A restored backup must never
+                    # depend on a -wal that belongs to a different file, so the
+                    # snapshot is normalised into one self-contained
+                    # rollback-journal database.
+                    destination.execute("PRAGMA journal_mode=DELETE")
+                finally:
+                    destination.close()
+                if lease.verify()["state"] != OWNED:
+                    # Unreachable while the descriptor is held on a working
+                    # filesystem; kept so a platform where the share mode does
+                    # not hold is refused instead of trusted.
+                    raise BackupError("snapshot_target_replaced", str(target))
+                # The snapshot is complete now: record its final size and time so
+                # a later cleanup can tell an unfinished copy from this one.  A
+                # name that changed identity under the lease is not ours, and the
+                # record refuses to adopt it -- that refusal is raised here
+                # instead of being left as a note in a successful result.
+                if not workspace.record(target.name):
+                    raise BackupError(
+                        "snapshot_target_replaced", "%s (identity_changed)" % target
+                    )
+    except WorkspaceError as error:
+        code = str(error).split(":", 1)[0]
+        if code in _TARGET_REFUSALS:
+            raise BackupError("snapshot_target_replaced", str(error)) from None
+        if code == _TARGET_UNPROVABLE:
+            raise BackupError("backup_target_unprovable", str(error)) from None
+        if code in _WORKSPACE_REFUSALS:
+            raise BackupError("backup_workspace_replaced", str(error)) from None
+        raise
     leftovers = [
         suffix
         for suffix in ("-wal", "-shm")
@@ -854,8 +933,15 @@ def _online_snapshot(
         and Path(str(target) + suffix).stat().st_size > 0
     ]
     if leftovers:
+        # Whatever wrote them, they were not proven to be this run's members, so
+        # they are kept and named instead of adopted or deleted.
         raise BackupError("snapshot_not_self_contained", ",".join(leftovers))
-    return [_file_fact(target)]
+    fact = _file_fact(target)
+    fact["parent_pin"] = pin.state
+    fact["parent_identity"] = pin.identity
+    if pin.error:
+        fact["parent_pin_error"] = pin.error
+    return [fact]
 
 
 def _file_group_copy(
@@ -863,8 +949,11 @@ def _file_group_copy(
     target: Path,
     group: dict[str, dict[str, object]],
     workspace: TemporaryWorkspace,
+    *,
+    stop: object = None,
 ) -> list[dict[str, object]]:
     """Byte-for-byte copy of the database file set; needs a quiet source."""
+    _stop_check(stop, "file_group_copy")
     for suffix in ("", "-wal"):
         entry = group[suffix]
         if entry["present"] and int(entry["bytes"]) and entry["sha256"] is None:
@@ -878,6 +967,7 @@ def _file_group_copy(
         entry = group[suffix]
         if not entry["present"]:
             continue
+        _stop_check(stop, "file_group_copy:" + (suffix or "main"))
         source_path = Path(str(source) + suffix)
         if not source_path.is_file():
             # Same three cases the copy used to discover by opening: a -shm
@@ -917,6 +1007,7 @@ def backup_library(
     *,
     label: str | None = None,
     mode: str = "auto",
+    stop: object = None,
 ) -> dict[str, object]:
     """Copy the library into a fresh, verified directory.
 
@@ -979,12 +1070,14 @@ def backup_library(
         raise BackupError("backup_directory_failed", str(error)) from None
     stage = "copy"
     try:
+        _stop_check(stop, "copy")
         copy_path = target / source.name
         if effective == "online_backup":
-            files = _online_snapshot(source, copy_path, workspace)
+            files = _online_snapshot(source, copy_path, workspace, stop=stop)
         else:
-            files = _file_group_copy(source, target, before, workspace)
+            files = _file_group_copy(source, target, before, workspace, stop=stop)
         stage = "verify"
+        _stop_check(stop, "verify")
 
         after = _group(source)
         after_counts = _source_counts(source)
@@ -1121,6 +1214,7 @@ def backup_library(
             "restore_steps": _restore_steps(source, source.name, effective, files),
         }
         stage = "manifest"
+        _stop_check(stop, "manifest")
         manifest["manifest_path"] = str(_write_manifest(target, manifest))
         return manifest
     except BaseException as error:
