@@ -28,6 +28,7 @@ from typing import Any, Mapping
 
 from core.crawl_state_reader import CrawlStateUnreadable, ReadOnlyCrawlState
 from core.follow_coverage import CoverageError, build_coverage
+from core.follow_facts_v2 import V2FactsError, coverage_facts, read_only_connection
 from core.follow_coverage_text import render
 from core.follow_facts import StateSource, gather_facts
 from core.filter_explain import explain
@@ -104,6 +105,60 @@ def coverage_report(database: Path, run_id: str) -> dict[str, Any]:
     }
 
 
+def coverage_report_v2(database: Path, job_id: str) -> dict[str, Any]:
+    """Build the coverage summary for one V2 job, read-only.
+
+    This is the summary the current downloader feeds: the legacy crawl store has
+    no rows for a V2 job, which is why the desktop used to answer
+    "database_missing" for work it had just done.  The facts come from one read
+    transaction over library.sqlite3 (see core.follow_facts_v2 for what V2 does
+    and does not record).
+
+    The result names its provider, so a reader can tell a legacy answer from a
+    V2 answer without guessing which database was opened.
+    """
+    try:
+        connection = read_only_connection(database)
+    except V2FactsError as error:
+        raise ReportError(error.code, error.detail) from None
+    try:
+        connection.execute("BEGIN")
+        facts = coverage_facts(connection, job_id)
+        connection.execute("COMMIT")
+    except V2FactsError as error:
+        raise ReportError(error.code, error.detail) from None
+    except ReportError:
+        raise
+    finally:
+        connection.close()
+    scope = {"kind": "follow_job", "job_id": str(job_id), "provider": "v2"}
+    try:
+        coverage = build_coverage(facts, scope=scope)
+    except CoverageError as error:
+        raise ReportError("facts_rejected", str(error)) from None
+    payload = coverage.as_dict()
+    expected = (facts.get("pages") or {}).get("expected") or []
+    notes = {
+        "provider": "v2",
+        "page_evidence": "present" if expected else "missing",
+        "expected_content_version": "missing",
+        "note": (
+            "V2 保存了应有页集合与落盘摘要，但没有保存作品页的期望内容代次；"
+            "因此交付维度只能到 unknown，不能声称本轮页面已齐"
+        ),
+    }
+    if facts.get("page_gaps"):
+        notes["pages_expected_missing"] = len(facts["page_gaps"])
+    return {
+        "question": "follow_coverage",
+        "provider": "v2",
+        "scope": payload["scope"],
+        "coverage": payload,
+        "facts_notes": notes,
+        "exit_code": coverage_exit_code(payload["overall"]),
+    }
+
+
 _COVERAGE_WORDS = {
     EXIT_OK: "结论成立：本轮范围已查完、保存已齐",
     EXIT_ATTENTION: "结论是部分成立：有维度明确没完成",
@@ -114,12 +169,15 @@ _COVERAGE_WORDS = {
 def coverage_lines(report: Mapping[str, Any]) -> list[str]:
     """The human text: the engine's own sentences, not a second set of words."""
     lines = list(render(report["coverage"]))
+    provider = report["facts_notes"].get("provider", "legacy")
+    source = "V2 任务库（只读）" if provider == "v2" else "旧运行状态库（只读，legacy）"
     lines.append(
-        "数据来源: 运行状态库（只读）。页级证据: %s。"
+        "数据来源: %s。页级证据: %s。"
         % (
+            source,
             "有"
             if report["facts_notes"]["page_evidence"] == "present"
-            else "无——保存是否齐全无法证明"
+            else "无——保存是否齐全无法证明",
         )
     )
     lines.append("退出码: %d（%s）" % (report["exit_code"], _COVERAGE_WORDS[report["exit_code"]]))

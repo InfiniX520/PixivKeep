@@ -26,7 +26,8 @@ from core.output_locations import OutputLocations, read_artist_ids
 from core.page_delivery import PageDeliveryExecutor
 from core.pixiv_follow_source import PixivFollowSource
 from core.pixiv_query_source import PixivQuerySource
-from core.report_commands import coverage_lines, coverage_report
+from core.report_commands import (
+    ReportError, coverage_lines, coverage_report, coverage_report_v2)
 from core.request_pacing import RequestPacer
 from core.task_contracts import PathRef
 from pixivpy3 import AppPixivAPI
@@ -125,23 +126,46 @@ class DesktopRuntime(CollectionRuntime):
         """
         self._app_paths = paths
 
-    def coverage_summary(self, *, run_id, state_path=None):
-        """One crawl run's coverage summary, read on the query owner.
+    def coverage_summary(self, *, run_id=None, job_id=None, state_path=None,
+                         provider=None):
+        """One task's coverage summary, read on the query owner.
 
-        Read-only by construction: the report goes through
-        core.crawl_state_reader (SQLite mode=ro + query_only), never through the
-        crawl state writer, which would create the directory, switch the journal
-        mode and run DDL on the way in.
+        The default source is the V2 library the current downloader writes
+        (download_logs/library.sqlite3), addressed by the job the user selected.
+        The legacy crawl store is still readable, but only when a caller asks for
+        it explicitly (state_path= or provider="legacy"), and the report says
+        which one answered.  Read-only by construction: mode=ro plus query_only,
+        never the crawl-state writer, which would create the directory, switch
+        the journal mode and run DDL on the way in.
         """
         return self._query_command(self._queries, self._coverage_summary,
-            run_id=run_id, state_path=state_path)
+            run_id=run_id, job_id=job_id, state_path=state_path, provider=provider)
 
-    def _coverage_summary(self, *, run_id, state_path=None):
-        database = Path(state_path) if state_path else self._crawl_state_path()
-        report = coverage_report(database, str(run_id))
-        return {"run_id": str(run_id), "database": str(database),
-                "report": report, "lines": coverage_lines(report),
-                "exit_code": report["exit_code"]}
+    def _coverage_summary(self, *, run_id=None, job_id=None, state_path=None,
+                          provider=None):
+        task = job_id if job_id is not None else run_id
+        if task is None or not str(task).strip():
+            # No selection is not "the first run": a report about a task the
+            # user did not choose would describe someone else's work.
+            raise ReportError("job_required", "选择任务后才能看覆盖摘要")
+        name = str(provider or "")
+        if state_path is not None or name == "legacy":
+            database = Path(state_path) if state_path else self._crawl_state_path()
+            source = "legacy"
+            report = coverage_report(database, str(task))
+        else:
+            database = self._library_path()
+            source = "v2"
+            report = coverage_report_v2(database, str(task))
+        return {"run_id": str(task), "job_id": str(task), "provider": source,
+                "database": str(database), "report": report,
+                "lines": coverage_lines(report), "exit_code": report["exit_code"]}
+
+    def _library_path(self) -> Path:
+        paths = getattr(self, "_app_paths", None)
+        if paths is None:
+            raise RuntimeError("library path is not attached")
+        return paths.download_logs_dir / "library.sqlite3"
 
     def _crawl_state_path(self) -> Path:
         paths = getattr(self, "_app_paths", None)
