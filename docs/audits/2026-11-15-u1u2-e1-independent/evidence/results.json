@@ -1,0 +1,285 @@
+{
+  "date": "2026-11-15",
+  "audited_commit": "5661d8bb7e4f39b2ee4c5ea09257bd5cc4cd7651",
+  "comparison_base": "031627c64eb2aac5605b05a21a47a7c0b3c5fef2",
+  "previous_audit_commit": "a89842b84d76d83461cfb810d5f9e3df1b1659d2",
+  "daily_commit": "4ba891e34c312f049ef933eeb517da1e928b7575",
+  "audit_branch": "audit/u1u2-e1-independent-20261115",
+  "findings": {
+    "P1": [
+      "EA-01"
+    ],
+    "P2": [
+      "EA-02",
+      "EA-03",
+      "EA-04",
+      "EA-05",
+      "EA-06",
+      "EA-07",
+      "EA-08",
+      "EA-09"
+    ]
+  },
+  "existing_suite": {
+    "tests": 3351,
+    "passed": 3347,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 4
+  },
+  "runs": {
+    "full01": {
+      "tests": 3314,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 4,
+      "passed": 3310,
+      "seconds": 738.917,
+      "xml_sha256": "fc571482668350235c05449488bb4d6d067fee4e013853542a24f42c70458b16"
+    },
+    "tk_view02": {
+      "tests": 25,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 25,
+      "seconds": 19.92,
+      "xml_sha256": "1978e993568485ee4f390bcad9977a7eb69a2e1a861a12c2707efd060ec7f5ba"
+    },
+    "tk_coverage02": {
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 3,
+      "seconds": 1.548,
+      "xml_sha256": "0d227c8cda2c82865466fbd0b91f03396882a7d7d1af9fdcfa029f8efc746425"
+    },
+    "collection_presentation1": {
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 1,
+      "seconds": 1.573,
+      "xml_sha256": "2d3c5d30afda499f5aef19cdc39be782000bbe2c6c0975cfa3258a4090700f69"
+    },
+    "collection_presentation2": {
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 1,
+      "seconds": 1.715,
+      "xml_sha256": "ce4b829c8a947c63fe6d4743c1eb0e5566bd88cde66f835df4a8ec527266de7d"
+    },
+    "collection_presentation3": {
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 1,
+      "seconds": 1.426,
+      "xml_sha256": "45f5c56ff20b86295ba76237f97d4120cf72888e413d929edf677a172351df8f"
+    },
+    "collection_presentation4": {
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 1,
+      "seconds": 1.199,
+      "xml_sha256": "cf9eb9ce153d65144ed751355fced28ad9e5c545064713711ffef1b03a9092da"
+    },
+    "source_presentation1": {
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 1,
+      "seconds": 1.621,
+      "xml_sha256": "e04c1f0ca65537ef1c402bcc02d27befbb064f78a76010587f26db1506022955"
+    },
+    "source_presentation2": {
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 1,
+      "seconds": 1.587,
+      "xml_sha256": "47efc8095ff0ee7d23115e5f8713b1d1d58886bfc8f192941871d7c0b58372c2"
+    },
+    "source_presentation3": {
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 1,
+      "seconds": 1.732,
+      "xml_sha256": "c83d6a0f8883198fe353dafb0b373990e867659a6516ce23601d8f59f36a96ce"
+    },
+    "source_presentation4": {
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 1,
+      "seconds": 1.614,
+      "xml_sha256": "e5c10354a7cc95265caf86593818bb4aa9e836079642a35d830f7f3e83499a5b"
+    },
+    "source_presentation5": {
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 1,
+      "seconds": 0.75,
+      "xml_sha256": "38b175fa5760fb4308577916838670d472b37cac41bfb7c1ca10d218a82674c3"
+    },
+    "previous_original": {
+      "tests": 17,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 17,
+      "seconds": 1.065,
+      "xml_sha256": "e1b85d7d50f36a24d2e7a0694715e8606e550e531bfa759838e018fa191997ea"
+    },
+    "archive_tool": {
+      "tests": 23,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 23,
+      "seconds": 0.537,
+      "xml_sha256": "a4d0abe22f86c3f11ee8580ac44606418d67c1ff5ffe4dcf28deb9ac15d01aa2"
+    },
+    "previous_closure": {
+      "tests": 14,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 14,
+      "seconds": 2.843,
+      "xml_sha256": "1e2f7192c5d424fcaff06976ea11985225b8fd88f9feb6224c015345e0c41218"
+    },
+    "probes01": {
+      "tests": 15,
+      "failures": 14,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 1,
+      "seconds": 1.886,
+      "xml_sha256": "229d71f031d4d8876ffeed44ec55153c06a5dc6bb6b455073ab48ea23dfaae26"
+    },
+    "packaged02": {
+      "tests": 15,
+      "failures": 14,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 1,
+      "seconds": 1.75,
+      "xml_sha256": "cf7138e8a8943243186dc4468adcb6d6b24e9b0f2ada74a9833594cc1a47be99"
+    }
+  },
+  "skips": [
+    {
+      "test": "tests.test_local_observation::test_real_symlink_file_is_rejected_when_platform_supports_it",
+      "reason": "real reparse point unavailable in isolated test directory: OSError"
+    },
+    {
+      "test": "tests.test_local_observation::test_real_symlink_ancestor_is_rejected_even_when_target_is_inside_root",
+      "reason": "real reparse point unavailable in isolated test directory: OSError"
+    },
+    {
+      "test": "tests.test_local_observation::test_real_symlink_root_is_rejected",
+      "reason": "real reparse point unavailable in isolated test directory: OSError"
+    },
+    {
+      "test": "tests.test_u1a_j01_health::test_w_phase_local_boundaries_are_not_wired_into_reuse_yet",
+      "reason": "W 阶段剩余边界（本轮只登记，不强行通过）：根不可用/重解析点/读取中变化已能进入 needs_verification（见 test_u1a_reuse_gate 与 artifact_health 契约），但仍缺：①根不可用/外置卷的 UI 与恢复动作，不把整库当成丢失；②链接/重解析点指向根外时的端到端拒绝断言；③同一批次同一 artifact 只观察一次的缓存；④跨会话不复用旧缓存；⑤快速核验不得升级为严格复用的端到端用例。"
+    }
+  ],
+  "incomplete_attempts": [
+    {
+      "name": "tk_view",
+      "status": "incomplete_no_final_xml",
+      "observed": "21 progress dots; process no longer exists; no known exit status; not counted as pass or product failure",
+      "log_sha256": "ee3707bcc8eb259af9c0a7807a88ceff0b461d07506062497ef97e8f2279c40f"
+    }
+  ],
+  "restored_history": [
+    {
+      "path": "docs/audits/2026-11-15-u1u2-independent/DEVELOPMENT_GUIDE.md",
+      "sha256": "c687a0018fdb62a61d0c8d36d3814c8aed1f777bf738cd2d2d871dfc994c13e5",
+      "source": "a89842b"
+    },
+    {
+      "path": "docs/audits/2026-11-15-u1u2-independent/FINDINGS.md",
+      "sha256": "1233714b6785b09bdb11377ac71787d4c2dc9353a21c924b753998f4a6b11433",
+      "source": "a89842b"
+    },
+    {
+      "path": "docs/audits/2026-11-15-u1u2-independent/README.md",
+      "sha256": "88773e525b5b52175b97bc825fee99a27dad10542cd2e3212275d0aff47e4481",
+      "source": "a89842b"
+    },
+    {
+      "path": "docs/audits/2026-11-15-u1u2-independent/evidence/results.json",
+      "sha256": "3a3e8ac37e12b7ffaa763509d93f970fbc8fc1c8821f3203b9276626f7597e92",
+      "source": "a89842b"
+    },
+    {
+      "path": "docs/audits/2026-11-15-u1u2-independent/evidence/test_independent.py",
+      "sha256": "83d858d494bcc15f3a88cbcb0b8775581a20b0a1c076b4592b0261b386852db1",
+      "source": "a89842b"
+    }
+  ],
+  "inventory": {
+    "active_worktrees": 58,
+    "archived_worktrees": 73,
+    "dirty_active": 5,
+    "missing_previous_paths": [],
+    "new_paths": [
+      ".runtime/jpgpng_u1u2_e1_audit_20261115_01/review",
+      ".runtime/jpgpng_u1u2_fix_20261115_01/integration_worktree",
+      ".runtime/jpgpng_u1u2_fix_20261115_01/lanes/cli_worktree",
+      ".runtime/jpgpng_u1u2_fix_20261115_01/lanes/e1_batches_worktree",
+      ".runtime/jpgpng_u1u2_fix_20261115_01/lanes/e1_chain_worktree",
+      ".runtime/jpgpng_u1u2_fix_20261115_01/lanes/e1_cli_worktree",
+      ".runtime/jpgpng_u1u2_fix_20261115_01/lanes/e1_conflicts_worktree",
+      ".runtime/jpgpng_u1u2_fix_20261115_01/lanes/e1_report_worktree",
+      ".runtime/jpgpng_u1u2_fix_20261115_01/lanes/e1_rules_worktree",
+      ".runtime/jpgpng_u1u2_fix_20261115_01/lanes/e1_scope_worktree",
+      ".runtime/jpgpng_u1u2_fix_20261115_01/lanes/s1_worktree",
+      ".runtime/jpgpng_u1u2_fix_20261115_01/lanes/s2_worktree",
+      ".runtime/jpgpng_u1u2_fix_20261115_01/lanes/s3_worktree",
+      ".runtime/jpgpng_u1u2_fix_20261115_01/lanes/s4_worktree",
+      ".runtime/jpgpng_u1u2_fix_20261115_01/lanes/ui_impl_worktree"
+    ],
+    "advanced": [
+      {
+        "path": ".runtime/jpgpng_u1b_u1c_20261114_01/lanes/u2b_reasons_worktree",
+        "before": "af42f0d1ff9aabb92aa1b7d66197f0bbc2c15051",
+        "now": "ac199c81aef44d702cc1a30982e8832d8e7375f1"
+      },
+      {
+        "path": ".runtime/jpgpng_u1u2_audit_20261115_01/review",
+        "before": "031627c64eb2aac5605b05a21a47a7c0b3c5fef2",
+        "now": "a89842b84d76d83461cfb810d5f9e3df1b1659d2"
+      }
+    ],
+    "daily_head": "4ba891e34c312f049ef933eeb517da1e928b7575",
+    "candidate_head": "5661d8bb7e4f39b2ee4c5ea09257bd5cc4cd7651"
+  },
+  "boundaries": {
+    "product_edited": false,
+    "real_data_accessed": false,
+    "network_product_tested": false,
+    "installed_packages": false,
+    "main_merged": false,
+    "deployed": false
+  },
+  "runtime": "../.runtime/jpgpng_u1u2_e1_audit_20261115_01",
+  "probe_sha256": "bbf12546725b0908d3a3ae08bb2ac9cd97d8b5a831fbb3ba9345ff40e8b95b36"
+}

@@ -2378,6 +2378,60 @@
       "deployed": false,
       "merged_to_main": false,
       "read_only_audit": false
+    },
+    {
+      "session_date": "2026-11-15",
+      "summary": "Independent audit of 5661d8b U1/U2 fixes, wiring and E1 offline engines; historical audit restored and current navigation repaired",
+      "audit_branch": "audit/u1u2-e1-independent-20261115",
+      "audited_commit": "5661d8bb7e4f39b2ee4c5ea09257bd5cc4cd7651",
+      "daily_commit": "4ba891e34c312f049ef933eeb517da1e928b7575",
+      "report": "docs/audits/2026-11-15-u1u2-e1-independent/README.md",
+      "findings": {
+        "P1": [
+          "EA-01"
+        ],
+        "P2": [
+          "EA-02",
+          "EA-03",
+          "EA-04",
+          "EA-05",
+          "EA-06",
+          "EA-07",
+          "EA-08",
+          "EA-09"
+        ]
+      },
+      "verification": {
+        "existing_suite": {
+          "tests": 3351,
+          "passed": 3347,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 4
+        },
+        "previous_original": 17,
+        "new_probes": {
+          "tests": 15,
+          "passed": 1,
+          "failed": 14,
+          "errors": 0
+        },
+        "archive_tool": 23,
+        "previous_closure": 14,
+        "tk_first_attempt": "incomplete; preserved; not counted"
+      },
+      "organization": {
+        "active_worktrees": 58,
+        "archived_worktrees": 73,
+        "dirty_existing_preserved": 5,
+        "restored_prior_audit_files": 5,
+        "moved_or_deleted": false
+      },
+      "product_source_changed": false,
+      "business_data_changed": false,
+      "deployed": false,
+      "merged_to_main": false,
+      "read_only_audit": true
     }
   ]
 }
