@@ -620,6 +620,36 @@ def build_scope(snapshot, *, groups, kind="group_download"):
     )
 
 
+def _without_account(scope):
+    """The same refreshed scope, with the identity left as unrecorded (R4-02).
+
+    Used where the caller's scope never named an account and the snapshot does.
+    Members, blocks, completeness and the unknown reason are the fresh ones -
+    those are facts about the catalog the snapshot describes.  The account is by
+    construction not one of them: a member set and a snapshot label are not an
+    identity chain, which is why the audit's counterexample could move a scope
+    from one account to another without changing either.
+
+    The result cannot be told apart from a scope built out of a snapshot that
+    never named an account, so every consumer keeps saying "unknown" and no
+    report can call itself complete on the strength of this refresh.
+    """
+    source = {key: value for key, value in scope.source.items() if key != "account_id"}
+    return GroupScope(
+        kind=scope.kind,
+        snapshot_id=scope.snapshot_id,
+        group_pairs=scope.group_pairs,
+        artist_ids=scope.artist_ids,
+        sides=scope.sides,
+        blocks=scope.blocks,
+        overlap=scope.overlap,
+        source=source,
+        completeness=scope.completeness,
+        unknown_reason=scope.unknown_reason,
+        account_id="",
+    )
+
+
 def ensure_current(scope, snapshot, *, groups=None):
     """Rebuild the scope and refuse when its member set has moved.
 
@@ -644,10 +674,19 @@ def ensure_current(scope, snapshot, *, groups=None):
     (scope_account_unproven).  Two unknown accounts are not a disagreement - they
     are simply unproven, and the report is where that becomes a visible unknown.
 
-    A legacy scope that could not name its account, checked against a snapshot
-    that can, is accepted: the evidence only got stronger, and the returned
-    scope is the one carrying the account.  Refusing that case would make the
-    upgrade itself a reason to abandon a running task.
+    A scope that never named its account cannot acquire one here (R4-02).  A later
+    snapshot naming an account proves two things about the *refresh* - the members
+    and the label - and neither of them is where the old evidence came from: the
+    audit's original counterexample was exactly the same member set under the same
+    snapshot label belonging to another account.  So the refreshed members and the
+    refreshed completeness are kept, the identity is not, and the returned scope
+    still says the account is unknown.  A caller that needs the account has to
+    build a fresh scope from the snapshot it trusts; continuing to use this one is
+    not a silent upgrade, because every consumer still sees "unknown" and the
+    report still refuses to call itself complete.  A caller that needs the account
+    has to call build_scope with the snapshot it trusts; this function will not do
+    that on its behalf.  No production caller exists yet (only the tests call this
+    function), which is why the rule could be tightened before the wiring step.
     """
     if not isinstance(scope, GroupScope):
         raise OrganizerError("scope_required")
@@ -669,6 +708,11 @@ def ensure_current(scope, snapshot, *, groups=None):
             raise OrganizerError("scope_account_changed")
     elif scope.account_id and not fresh.account_id:
         raise OrganizerError("scope_account_unproven")
+    elif not scope.account_id and fresh.account_id:
+        # Do not invent an identity for evidence that never carried one (R4-02).
+        # The members and completeness below are still checked and still adopted;
+        # only the account is left as the caller's scope stated it.
+        fresh = _without_account(fresh)
     if fresh.fingerprint != scope.fingerprint:
         raise OrganizerError("scope_changed")
     if _EVIDENCE_RANK[fresh.completeness] < _EVIDENCE_RANK[scope.completeness]:
