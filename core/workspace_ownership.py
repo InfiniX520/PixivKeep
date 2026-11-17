@@ -30,6 +30,7 @@ from __future__ import annotations
 import contextlib
 import os
 import stat
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -308,6 +309,68 @@ def _volume_of(info: os.stat_result) -> int:
     return int(getattr(info, "st_dev", 0) or 0) & 0xFFFFFFFF
 
 
+#: How long the ACL change may take before it is reported as not applied.
+_ACL_TIMEOUT_SECONDS = 20.0
+
+
+class _AclError(RuntimeError):
+    """The directory ACL could not be read back; kept as a reason string."""
+
+
+def _account_name() -> str:
+    domain = os.environ.get("USERDOMAIN") or ""
+    user = os.environ.get("USERNAME") or ""
+    if user and domain:
+        return "%s\\%s" % (domain, user)
+    if user:
+        return user
+    raise _AclError("account_unknown")
+
+
+def restrict_directory(path: Path) -> dict[str, object]:
+    """Make a directory this run created writable only for this account.
+
+    A private staging directory is private only while nothing else can create a
+    file in it.  Windows has no lock that refuses child creation, so the DACL is
+    the one lever that applies to the directory entry itself: inheritance is
+    removed and only this account and SYSTEM keep full control.
+
+    Success is reported as "restricted".  Every failure -- icacls missing, an
+    unusual filesystem, a policy that refuses the change -- is reported as
+    "degraded" with the reason.  It is never smoothed into success, and it does
+    not abort the caller: the ownership record still says which names this run
+    created, so the write remains accountable, only less exclusive.
+    """
+    try:
+        account = _account_name()
+        completed = subprocess.run(
+            [
+                "icacls",
+                str(path),
+                "/inheritance:r",
+                "/grant:r",
+                account + ":(OI)(CI)F",
+                "/grant:r",
+                "SYSTEM:(OI)(CI)F",
+            ],
+            capture_output=True,
+            timeout=_ACL_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError, _AclError) as error:
+        return {"state": "degraded", "reason": type(error).__name__}
+    if completed.returncode != 0:
+        text = (completed.stderr or completed.stdout or b"").decode(
+            "utf-8", "replace"
+        )
+        return {
+            "state": "degraded",
+            "reason": "icacls_exit_%d" % completed.returncode,
+            "detail": text.strip()[:200],
+        }
+    return {"state": "restricted", "account": account, "reason": ""}
+
+
 def _unlink_proven(target: Path, key: tuple[int, int]) -> None:
     """Remove a name only while it still describes the object we created."""
     if not key_available(key):
@@ -541,6 +604,8 @@ class TemporaryWorkspace:
         #: cleanup reports the name as replaced instead of adopting it.
         self._conflicts: list[dict[str, object]] = []
         self._closed = False
+        #: What was proven about the directory's ACL, filled by restrict().
+        self._acl: dict[str, object] = {"state": "unknown", "reason": "not_attempted"}
 
     @classmethod
     def adopt(cls, path: str | Path, *, purpose: str):
@@ -722,16 +787,69 @@ class TemporaryWorkspace:
         self._claims[name] = claim
         return ClaimedFile(claim)
 
+    def restrict(self) -> dict[str, object]:
+        """Try to make this directory writable only for this account.
+
+        Called once, right after adoption and before the first member is
+        created.  The returned fact is what the caller records: "restricted"
+        means the directory now refuses child creation to every other principal,
+        "degraded" means it does not and the ownership record is the only thing
+        keeping the family accountable.
+        """
+        self._acl = restrict_directory(self.path)
+        return dict(self._acl)
+
+    @property
+    def acl(self) -> dict[str, object]:
+        """The ACL fact as it stands: not_attempted, restricted or degraded."""
+        return dict(self._acl)
+
+    def forget(self, name: str) -> None:
+        """Drop the ownership record of one name without touching the file.
+
+        A caller that recorded a member and then found the bytes under that name
+        are not the ones it wrote has not earned the claim: forgetting it keeps
+        the file on disk (the cleanup reports it as unowned) and stops a later
+        discard() from removing something this run cannot prove it created.
+        """
+        self._members.pop(name, None)
+        self._claims.pop(name, None)
+
     def claim_of(self, name: str) -> OwnershipClaim | None:
         """The claim recorded for one member, or None when it was never claimed."""
         return self._claims.get(name)
 
     def verify_member(self, name: str) -> dict[str, object]:
-        """Does the name still point at the object this run created?"""
+        """Does the name still point at the object this run created?
+
+        Two kinds of member exist: one created through claim(), which carries a
+        full OwnershipClaim, and one adopted with record() after another step
+        wrote it (the manifest).  Both recorded an identity, so both can be
+        checked here; only the claimed one also carries the creation proof.
+        """
         claim = self._claims.get(name)
-        if claim is None:
-            return {"state": UNKNOWN, "reason": "not_claimed", "via": "path"}
-        return verify_owned(claim)
+        if claim is not None:
+            return verify_owned(claim)
+        member = self._members.get(name)
+        if member is None:
+            return {"state": UNKNOWN, "reason": "not_recorded", "via": "path"}
+        target = self.path / name
+        try:
+            info = os.lstat(target)
+        except FileNotFoundError:
+            return {"state": FOREIGN, "reason": "path_missing", "via": "path"}
+        except OSError as error:
+            return {
+                "state": UNKNOWN,
+                "reason": "path_unreadable",
+                "error": type(error).__name__,
+                "via": "path",
+            }
+        if not member.provable:
+            return {"state": UNKNOWN, "reason": "identity_unavailable", "via": "path"}
+        if is_reparse_point(info) or _key(info) != member.key:
+            return {"state": FOREIGN, "reason": "path_replaced", "via": "path"}
+        return {"state": OWNED, "reason": "", "via": "path"}
 
 
 

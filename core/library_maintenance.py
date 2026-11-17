@@ -626,6 +626,134 @@ def _backup_name(label: str | None, destination_root: Path) -> Path:
     raise BackupError("backup_target_exists", stem)
 
 
+#: The names SQLite itself creates, truncates and removes beside a database.
+#: Authorising the database file is not authorising these: they are the rest of
+#: the *file family*, and a backup that removes one of them has removed somebody
+#: else's file.  Measured on this host: SQLite unlinks a pre-existing -journal
+#: and a pre-existing -wal while opening and closing the database, without any
+#: Python code asking for it.
+_FAMILY_SUFFIXES = ("-journal", "-wal", "-shm")
+
+#: Prefix of the private directory one backup is built in before it is published.
+_STAGING_PREFIX = ".staging-"
+
+#: How many times a unique staging name is tried before giving up.
+_STAGING_ATTEMPTS = 8
+
+
+def _family_members(target: Path) -> dict[str, dict[str, object]]:
+    """What sits at the three sidecar names beside one database, if anything.
+
+    Size, time and digest travel with the fact so a refusal can prove the file
+    was left alone byte for byte instead of merely claiming it.
+    """
+    found: dict[str, dict[str, object]] = {}
+    for suffix in _FAMILY_SUFFIXES:
+        candidate = Path(str(target) + suffix)
+        try:
+            info = os.lstat(candidate)
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            found[suffix] = {
+                "name": candidate.name,
+                "state": "unreadable",
+                "reason": type(error).__name__,
+            }
+            continue
+        entry: dict[str, object] = {
+            "name": candidate.name,
+            "state": "present",
+            "bytes": int(info.st_size),
+            "mtime_ns": int(info.st_mtime_ns),
+            "sha256": None,
+        }
+        try:
+            entry["sha256"] = _sha256_file(candidate)
+        except OSError:
+            # A file that cannot be read is still a file that must not be
+            # removed; the hash is unknown, the name and size are not.
+            entry["sha256"] = None
+        found[suffix] = entry
+    return found
+
+
+def _require_empty_family(target: Path, *, stage: str) -> dict[str, object]:
+    """Refuse to let SQLite touch the family while a stranger owns a member.
+
+    This runs *before* the connection is opened, because an open is enough:
+    SQLite deletes a pre-existing -journal/-wal on its own.  It is a check in a
+    directory this run created and restricted, not a substitute for the
+    exclusive creation of every name the run itself writes -- both are needed,
+    and the report says which one was in force.
+    """
+    members = _family_members(target)
+    if members:
+        detail = ", ".join(
+            "%s(state=%s,bytes=%s,sha256=%s)"
+            % (
+                item["name"],
+                item.get("state"),
+                item.get("bytes", "?"),
+                str(item.get("sha256"))[:12],
+            )
+            for _suffix, item in sorted(members.items())
+        )
+        raise BackupError(
+            "backup_target_family_occupied",
+            "%s: %s (kept; nothing was opened; stage=%s)"
+            % (target, detail, stage),
+        )
+    return {
+        "precheck": "pass",
+        "checked": [Path(str(target) + suffix).name for suffix in _FAMILY_SUFFIXES],
+        "present": [],
+    }
+
+
+def _staging_directory(destination_root: Path) -> Path:
+    """A private, empty directory this run owns; the artifact is built inside."""
+    for _attempt in range(_STAGING_ATTEMPTS):
+        candidate = destination_root / (_STAGING_PREFIX + uuid.uuid4().hex[:12])
+        try:
+            candidate.mkdir(parents=False, exist_ok=False)
+        except FileExistsError:
+            continue
+        except OSError as error:
+            raise BackupError("backup_staging_failed", str(error)) from None
+        return candidate
+    raise BackupError("backup_staging_failed", "no unique staging name available")
+
+
+def _publish(shipping: Path, target: Path, workspace: TemporaryWorkspace) -> None:
+    """Give the finished directory its final name with one directory rename.
+
+    Two things are refused here, both before the rename: a name inside the
+    staging directory that this run did not create, and a final name that
+    already exists.  The rename itself is the only moment the final name comes
+    into being, so a reader can never see a half-written backup there, and no
+    file at the final name is ever opened by SQLite.
+    """
+    try:
+        present = sorted(entry.name for entry in os.scandir(shipping))
+    except OSError as error:
+        raise BackupError(
+            "backup_publish_failed", "staging unreadable: %s" % error
+        ) from None
+    foreign = [name for name in present if name not in set(workspace.members)]
+    if foreign:
+        raise BackupError(
+            "backup_target_family_foreign",
+            "%s: %s (kept; nothing published)" % (shipping, ",".join(foreign)),
+        )
+    if os.path.lexists(target):
+        raise BackupError("backup_target_exists", str(target))
+    try:
+        os.rename(shipping, target)
+    except OSError as error:
+        raise BackupError("backup_publish_failed", "%s: %s" % (target, error)) from None
+
+
 def _source_counts(path: Path) -> dict[str, int] | None:
     try:
         with contextlib.closing(_connect_readonly(path)) as connection:
@@ -658,6 +786,36 @@ def _write_manifest(directory: Path, manifest: dict[str, object]) -> Path:
         os.fsync(stream.fileno())
     os.replace(temporary, final)
     return final
+
+
+def _own_manifest(workspace: TemporaryWorkspace, directory: Path) -> None:
+    """Record the manifest this run just wrote as one of its own members.
+
+    _write_manifest leaves a fresh object behind (it writes a temporary name and
+    replaces), so there is no claim to inherit.  Recording it is still not a
+    guess: the bytes are read before and after the record, the name has to keep
+    pointing at the object that was recorded, and any difference drops the claim
+    again instead of leaving the cleanup a file it cannot prove it made.
+    """
+    path = directory / MANIFEST_NAME
+    try:
+        before = _sha256_file(path)
+    except OSError as error:
+        raise BackupError(
+            "backup_manifest_failed", "%s: %s" % (path, type(error).__name__)
+        ) from None
+    if not workspace.record(MANIFEST_NAME):
+        raise BackupError("backup_target_replaced", "%s (identity_changed)" % path)
+    try:
+        after = _sha256_file(path)
+    except OSError:
+        after = None
+    if after != before or workspace.verify_member(MANIFEST_NAME)["state"] != OWNED:
+        # The name no longer describes the manifest that was just written, so
+        # the claim is dropped and the file is kept: a cleanup that removes it
+        # would be removing something it cannot show it created.
+        workspace.forget(MANIFEST_NAME)
+        raise BackupError("backup_target_replaced", "%s (changed while recording)" % path)
 
 
 def _restore_steps(
@@ -861,6 +1019,7 @@ def _online_snapshot(
     workspace: TemporaryWorkspace,
     *,
     stop: object = None,
+    family: dict[str, object] | None = None,
 ) -> list[dict[str, object]]:
     """Consistent snapshot through the SQLite online backup API.
 
@@ -878,8 +1037,19 @@ def _online_snapshot(
     the lease is caught by the fstat comparison and nothing is written; one
     attempted afterwards is refused by the system.  Verifying after the write,
     as the previous version did, could only report the damage.
+
+    The lease covers the database *file*; SQLite also owns three names beside it
+    and removes two of them by itself while opening and closing (measured on
+    this host: a pre-existing -journal and a pre-existing -wal are unlinked by
+    SQLite alone).  Those names are checked here, after the claim and before the
+    connection, so a member this run did not create is never opened, journalled
+    over or unlinked.  The check is meaningful only against a directory this run
+    created and restricted; the residual window between the check and the
+    connection is stated in docs/optimization/2026-11-17/S0_CONTRACTS_R3.md.
     """
     claim = workspace.claim(target.name, purpose="online_snapshot")
+    if family is not None:
+        family.update(_require_empty_family(target, stage="before_connect"))
     pin = ParentPin(state="unknown", identity="", error="not_observed")
     try:
         with workspace.parent_pin() as pin:
@@ -952,7 +1122,14 @@ def _file_group_copy(
     *,
     stop: object = None,
 ) -> list[dict[str, object]]:
-    """Byte-for-byte copy of the database file set; needs a quiet source."""
+    """Byte-for-byte copy of the database file set; needs a quiet source.
+
+    Every destination name is created exclusively (O_EXCL) by workspace.claim,
+    so a name somebody else already owns is refused by the create itself.  The
+    three family names this function never writes are checked by the caller
+    before the copy starts: a -journal left in the staging directory belongs to
+    nobody here, and nothing in this run may remove it.
+    """
     _stop_check(stop, "file_group_copy")
     for suffix in ("", "-wal"):
         entry = group[suffix]
@@ -1024,11 +1201,22 @@ def backup_library(
     the source is not healthy enough for the online API.
 
     The manifest is written last, so its presence proves the copy verified.
-    From the moment the target directory exists to the moment the manifest is
+    From the moment the staging directory exists to the moment the manifest is
     in place, one failure boundary covers every stage.  A failure keeps the
     primary error and attaches the cleanup result to it; the cleanup only
     removes members this run recorded and still owns, so a failed backup never
     looks like a successful one and never deletes somebody else's file.
+
+    Where the files live while they are written is part of the guarantee, not
+    an implementation detail.  Every run builds its artifact inside a private
+    staging directory (".staging-<id>") whose ACL is restricted to this account
+    and SYSTEM when the filesystem allows it, and the finished directory gets
+    its final name through one atomic rename.  SQLite therefore never opens a
+    database whose family names are the ones a reader will see, and a name that
+    already sits beside the final name - a foreign -journal, -wal or -shm - is
+    never opened, journalled over or removed by this run.  The rename refuses to
+    publish when anything in the staging directory is not this run's, and it
+    refuses to replace an existing final name.
     """
     if mode not in {"auto", "online_backup", "file_group"}:
         raise BackupError("invalid_mode", mode)
@@ -1058,24 +1246,43 @@ def backup_library(
     target = _backup_name(label, destination_root)
     before = _group(source)
     before_counts = _source_counts(source)
+    # The artifact is built in a private directory of this run and only gets its
+    # final name through one directory rename.  That is what keeps SQLite away
+    # from the names a reader will later see: the database is opened at a
+    # staging name, never at <target>/<library name>, so no file that already
+    # sits beside the final name can be opened, journalled over or removed.
+    staging = _staging_directory(destination_root)
     try:
-        target.mkdir(parents=False, exist_ok=False)
-    except FileExistsError:
-        raise BackupError("backup_target_exists", str(target)) from None
-    except OSError as error:
-        raise BackupError("backup_directory_failed", str(error)) from None
-    try:
-        workspace = TemporaryWorkspace.adopt(target, purpose="backup")
+        workspace = TemporaryWorkspace.adopt(staging, purpose="backup")
     except WorkspaceError as error:
+        try:
+            os.rmdir(staging)
+        except OSError:
+            pass
         raise BackupError("backup_directory_failed", str(error)) from None
+    family: dict[str, object] = {
+        "root": str(staging),
+        "publish": "atomic_directory_rename",
+        "published": True,
+        "foreign": [],
+    }
+    workspace.restrict()
+    family["acl"] = workspace.acl
     stage = "copy"
     try:
         _stop_check(stop, "copy")
-        copy_path = target / source.name
+        copy_path = staging / source.name
         if effective == "online_backup":
-            files = _online_snapshot(source, copy_path, workspace, stop=stop)
+            files = _online_snapshot(
+                source, copy_path, workspace, stop=stop, family=family
+            )
         else:
-            files = _file_group_copy(source, target, before, workspace, stop=stop)
+            family.update(
+                _require_empty_family(
+                    staging / source.name, stage="before_group_copy"
+                )
+            )
+            files = _file_group_copy(source, staging, before, workspace, stop=stop)
         stage = "verify"
         _stop_check(stop, "verify")
 
@@ -1215,7 +1422,16 @@ def backup_library(
         }
         stage = "manifest"
         _stop_check(stop, "manifest")
-        manifest["manifest_path"] = str(_write_manifest(target, manifest))
+        # The final path is recorded in the manifest because the manifest only
+        # becomes readable after the rename: a manifest inside a directory is a
+        # manifest whose directory has already been published.
+        manifest["manifest_path"] = str(target / MANIFEST_NAME)
+        manifest["family"] = family
+        _write_manifest(staging, manifest)
+        _own_manifest(workspace, staging)
+        stage = "publish"
+        _stop_check(stop, "publish")
+        _publish(staging, target, workspace)
         return manifest
     except BaseException as error:
         # The primary failure is saved first; the cleanup result is attached to
