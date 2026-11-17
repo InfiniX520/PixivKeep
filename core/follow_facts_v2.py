@@ -568,15 +568,19 @@ def _private_copy(
                 ) from None
             digests: dict[str, str] = {}
             source_members: dict[str, list[int]] = {}
+            vanished: list[str] = []
             try:
                 for suffix in members:
                     _check_stop(stop, "private_copy")
                     source = Path(str(database) + suffix)
                     facts = before.get(source.name)
                     if facts is None:
-                        # The member vanished between the family observation and
-                        # the copy: that is a change, and the retry decides.
-                        raise OSError("%s disappeared during the copy" % source)
+                        # The main file was already gone when this attempt looked:
+                        # that is the source moving, not an I/O fault, so the next
+                        # attempt observes again instead of reporting a copy
+                        # failure (R4-A follow-up; the lead's probe).
+                        vanished.append(source.name)
+                        break
                     digests[source.name] = _copy_hashed(
                         source, attempt_dir / source.name, stop=stop
                     )
@@ -584,7 +588,15 @@ def _private_copy(
                         int(facts["size"]),
                         int(facts["mtime_ns"]),
                     ]
+            except FileNotFoundError as error:
+                # The member disappeared between the family observation and this
+                # copy.  A -wal that a checkpoint removed is the ordinary case;
+                # the retry re-observes and usually needs the main file only.
+                name = Path(str(getattr(error, "filename", "") or "")).name
+                vanished.append(name or database.name)
             except OSError as error:
+                # A real read/write fault: opening or reading the member failed
+                # for a reason that is not "the source moved".
                 raise V2FactsError(
                     "private_copy_failed", "%s (%s)" % (database, type(error).__name__)
                 ) from None
@@ -596,9 +608,17 @@ def _private_copy(
             # database".
             moved = [name for name in digests if before.get(name) != after.get(name)]
             difference["changed"] = sorted(set(difference["changed"]) | set(moved))
-            if difference["created"] or difference["removed"] or moved:
+            if vanished:
+                difference["removed"] = sorted(set(difference["removed"]) | set(vanished))
+            if (
+                vanished
+                or difference["created"]
+                or difference["removed"]
+                or difference["changed"]
+            ):
                 # The source moved under this attempt: the next one observes the
-                # family again, so the new member list includes what appeared.
+                # family again, so the new member list includes what appeared and
+                # leaves out what a checkpoint folded back into the main file.
                 previous_names = names
                 continue
             for name in digests:
@@ -615,10 +635,13 @@ def _private_copy(
                 "attempts": attempts,
                 "dropped_members": dropped,
             }, difference
+        moving = sorted(
+            set(difference["created"]) | set(difference["removed"]) | set(difference["changed"])
+        )
         raise V2FactsError(
             "source_changed_during_copy",
             "%s 在复制期间被改写（%s），私有副本不能代表任何单一时刻"
-            % (database, ", ".join(difference["created"] + difference["removed"])),
+            % (database, ", ".join(moving) or "名字与属性的观察窗口不稳定"),
         )
     except BaseException:
         # Cancelled, failed or refused: nothing this run created stays behind.
@@ -675,6 +698,7 @@ class ReadConnection(sqlite3.Connection):
             }
             ok = bool((plan.copy or {}).get("verified"))
             measured = "source_family_during_copy"
+            attempts = int((plan.copy or {}).get("attempts") or 1)
         else:
             before = dict(self._read_before or {})
             difference = _family_difference(
@@ -682,6 +706,26 @@ class ReadConnection(sqlite3.Connection):
             )
             ok = not difference["created"] and not difference["removed"]
             measured = "source_family_while_the_connection_was_open"
+            attempts = 1
+        # The window a copy read reports is the *last* attempt's; earlier attempts
+        # were thrown away because the source moved under them.  Without this
+        # sentence a reader would take "名字与属性一致" as a statement about the
+        # whole copy, which it is not.
+        note = (
+            "名字与属性在读取前后一致"
+            if ok and not difference["changed"]
+            else (
+                "名字未变；读取期间有其他连接改写了源库（读事务内完成，"
+                "摘要仍属于单一时刻）"
+                if ok
+                else "读取期间源文件族的名字发生了变化（不一定由本次读取造成）"
+            )
+        )
+        if attempts > 1:
+            note += (
+                "；这份结论来自最终第 %d 次尝试的观察窗口，前 %d 次因源在变被丢弃"
+                % (attempts, attempts - 1)
+            )
         return {
             "plan": plan.as_dict(),
             "source": {
@@ -694,16 +738,7 @@ class ReadConnection(sqlite3.Connection):
                 "moved": bool(difference["changed"]),
                 "measured": measured,
                 "checked": "names+size+mtime_ns",
-                "note": (
-                    "名字与属性在读取前后一致"
-                    if ok and not difference["changed"]
-                    else (
-                        "名字未变；读取期间有其他连接改写了源库（读事务内完成，"
-                        "摘要仍属于单一时刻）"
-                        if ok
-                        else "读取期间源文件族的名字发生了变化（不一定由本次读取造成）"
-                    )
-                ),
+                "note": note,
             },
         }
 

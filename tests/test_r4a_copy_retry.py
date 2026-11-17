@@ -341,6 +341,85 @@ def test_a_connection_that_cannot_open_leaves_nothing(tmp_path, monkeypatch):
     assert _leftovers(root) == []
 
 
+def test_a_wal_checkpointed_away_before_its_copy_is_retried(tmp_path, copy_hook):
+    """The reviewer's probe: the -wal disappears between the two observations.
+
+    Attempt 1 observed main + -wal; by the time it gets to the -wal, a checkpoint
+    has folded it into the main file and removed it.  That is the source moving,
+    so the retry observes again and needs the main file only - it is not a copy
+    failure, and it must not be reported as one.
+    """
+    database = tmp_path / "source.sqlite3"
+    _crash_shape(database, rows=(1, 2))
+    holder = {}
+
+    def checkpoint_after_the_main_copy(hook, source, destination, before):
+        if len(hook.calls) != 1:
+            return
+        writer = sqlite3.connect(database, isolation_level=None)
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        writer.close()
+        holder["checkpointed"] = True
+
+    hook = copy_hook(checkpoint_after_the_main_copy)
+    root = _private_root(tmp_path)
+    connection = read_only_connection(database, private_root=root)
+    try:
+        rows = _rows(connection)
+        plan = connection.plan
+        evidence = connection.read_evidence()
+    finally:
+        connection.close()
+
+    assert holder.get("checkpointed") is True
+    assert rows == [1, 2]
+    assert plan.copy["attempts"] == 2
+    assert plan.copy["verified"] is True
+    assert list(plan.copy["members"]) == ["source.sqlite3"]
+    assert plan.copy["dropped_members"] == ["source.sqlite3-wal"]
+    # The retry also shows up in the words a report prints.
+    assert "第 2 次尝试" in evidence["source"]["note"]
+    assert hook.calls == ["source.sqlite3", "source.sqlite3"]
+    assert _leftovers(root) == []
+
+
+def test_a_main_file_that_disappears_is_a_change_not_a_missing_database(tmp_path, copy_hook):
+    """The library itself moving is a change to report, not a missing database."""
+    database = tmp_path / "source.sqlite3"
+    _make_closed_wal(database)
+    holder = {}
+
+    def remove_the_library(hook, source, destination, before):
+        if holder.get("done"):
+            return
+        holder["done"] = True
+        Path(str(source)).unlink()
+
+    copy_hook(remove_the_library)
+    root = _private_root(tmp_path)
+    with pytest.raises(V2FactsError) as raised:
+        read_only_connection(database, private_root=root)
+    assert raised.value.code == "source_changed_during_copy"
+    assert _leftovers(root) == []
+
+
+def test_a_real_io_failure_is_still_reported_as_a_copy_failure(tmp_path, monkeypatch):
+    """The contrast: a read fault is not "the source moved"."""
+    database = tmp_path / "source.sqlite3"
+    _make_closed_wal(database)
+
+    def refuse(source, destination, *, stop=None):
+        raise PermissionError(13, "simulated permission failure", str(source))
+
+    monkeypatch.setattr(facts, "_copy_hashed", refuse)
+    root = _private_root(tmp_path)
+    with pytest.raises(V2FactsError) as raised:
+        read_only_connection(database, private_root=root)
+    assert raised.value.code == "private_copy_failed"
+    assert _leftovers(root) == []
+
+
 def test_the_three_read_modes_are_still_the_measured_ones(tmp_path):
     rollback = tmp_path / "rollback.db"
     sqlite3.connect(rollback).execute("CREATE TABLE t(v)").connection.close()
