@@ -139,9 +139,23 @@ class DesktopRuntime(CollectionRuntime):
         job_not_found instead of being read from the old database.
         The legacy crawl store is still readable, but only when a caller asks for
         it explicitly (state_path= or provider="legacy"), and the report says
-        which one answered.  Read-only by construction: mode=ro plus query_only,
-        never the crawl-state writer, which would create the directory, switch
-        the journal mode and run DDL on the way in.
+        which one answered.
+
+        Two promises are kept apart on purpose (S0_CONTRACTS_R3 section 3), and
+        the report carries the evidence for whichever one this run could make:
+
+        * sql_read_only: the connection cannot write (mode=ro plus query_only),
+          and never opens the crawl-state writer, which would create the
+          directory, switch the journal mode and run DDL on the way in;
+        * source_unchanged: the library's files and their bytes were the same
+          before and after the read.  A live WAL store cannot promise this (the
+          -shm lock bytes move while a writer is running), and a store whose WAL
+          has no -shm is read from a private copy rather than by creating one in
+          the user's directory.
+
+        The chosen mode, the promise and the observed differences travel in
+        report["read"] and report["facts_notes"]["read_*"]; a caller that wants
+        to show them must read those, not guess from the directory.
         """
         return self._query_command(self._queries, self._coverage_summary,
             run_id=run_id, job_id=job_id, state_path=state_path, provider=provider)
