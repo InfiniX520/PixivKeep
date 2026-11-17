@@ -406,12 +406,27 @@ def quality_evidence(path, *, decode_policy: str = "structure", limits=None, sto
                     stop=stop,
                     stream=passed,
                 )
+                # Charge what the decoder itself read BEFORE this check reads the
+                # rest of the file.  Charging it afterwards (as the first version
+                # did) means finish() asks the meter for the remainder while the
+                # decoder's bytes are still uncharged, and a decoder that stops at
+                # the end of the image data allowed one check to read up to twice
+                # the ceiling.  Today's PNG decoder reads to EOF, so finish() is a
+                # no-op there; this is the guard a streaming decoder needs.
+                early_spent = _receipt_bytes(receipt) if receipt is not None else None
+                early_refusal = None
+                if early_spent is not None:
+                    early_refusal = command.charge(early_spent)
+                charged_early = early_spent is not None and early_refusal is None
                 if passed is not None:
                     if decode.state == "ok" and passed.reads == 0:
                         # The decoder answered without reading through the pass
                         # (a decoder that opens the path itself), so its verdict
                         # cannot be tied to any bytes this check hashed.
                         passed.reason = "decode_stream_not_observed"
+                    elif decode.state == "ok" and early_refusal is not None:
+                        decode = Dimension("undecided", early_refusal)
+                        passed.reason = early_refusal
                     elif decode.state == "ok":
                         # A decoder may stop at the end of the image data while
                         # the file continues (trailing bytes): the rest is part
@@ -434,7 +449,7 @@ def quality_evidence(path, *, decode_policy: str = "structure", limits=None, sto
                     command.mark_unknown("decoder_did_not_report_bytes")
                     if decode.state == "ok":
                         decode = Dimension("undecided", "decoder_did_not_report_bytes")
-                else:
+                elif not charged_early:
                     refused_charge = command.charge(spent)
                     if refused_charge is not None:
                         decode = Dimension("undecided", refused_charge)

@@ -45,10 +45,19 @@ def _uri(database: Path) -> str:
 class ReadOnlyCrawlState:
     """Three SELECTs over a crawl state store, opened strictly read-only."""
 
-    def __init__(self, database: str | Path) -> None:
+    def __init__(self, database: str | Path, *, connection=None) -> None:
         self.database_path = Path(database)
-        if not self.database_path.is_file():
+        if connection is None and not self.database_path.is_file():
             raise CrawlStateUnreadable("database_missing", str(self.database_path))
+        if connection is not None:
+            # A caller that already decided *how* to read (the coverage command
+            # uses core.follow_facts_v2.read_only_connection, which may read a
+            # private copy) hands the connection in.  Opening a second connection
+            # here would undo that decision: on a quiescent WAL store SQLite would
+            # create its -shm/-wal beside the user's file (measured).
+            self._connection = connection
+            self._validate_schema()
+            return
         try:
             connection = sqlite3.connect(
                 _uri(self.database_path), uri=True, timeout=5.0
@@ -60,22 +69,31 @@ class ReadOnlyCrawlState:
         connection.row_factory = sqlite3.Row
         try:
             connection.execute("PRAGMA query_only=1")
+        except sqlite3.Error as error:
+            connection.close()
+            raise CrawlStateUnreadable("database_unreadable", str(error)) from None
+        self._connection = connection
+        self._validate_schema()
+
+    def _validate_schema(self) -> None:
+        """The two tables every read below needs, or a typed refusal."""
+        try:
             tables = {
                 str(row[0])
-                for row in connection.execute(
+                for row in self._connection.execute(
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 ).fetchall()
             }
         except sqlite3.Error as error:
-            connection.close()
+            self._connection.close()
             raise CrawlStateUnreadable("database_unreadable", str(error)) from None
         missing = [name for name in REQUIRED_TABLES if name not in tables]
         if missing:
-            connection.close()
+            self._connection.close()
             raise CrawlStateUnreadable(
-                "schema_missing", "%s (missing %s)" % (self.database_path, ", ".join(missing))
+                "schema_missing",
+                "%s (missing %s)" % (self.database_path, ", ".join(missing)),
             )
-        self._connection = connection
 
     # -- reads -------------------------------------------------------------
 

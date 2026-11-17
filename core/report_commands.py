@@ -85,27 +85,50 @@ def coverage_report(database: Path, run_id: str) -> dict[str, Any]:
     stays absent, which is why a summary built from this source tops out at
     `unknown` - the summariser says so instead of inventing numbers.
     """
+    # The legacy store gets the same read decision as the V2 one: the plan is
+    # measured from the files (a quiescent WAL store is read from a private copy),
+    # and the facts about what the read did to the source travel with the report
+    # instead of being assumed.  Before this, a coverage run on a cleanly closed
+    # crawl store created its -wal/-shm beside the user's file while the text said
+    # "read-only" (RA-02 adjacent).
     try:
-        reader = ReadOnlyCrawlState(database)
-    except CrawlStateUnreadable as error:
+        connection = read_only_connection(database)
+    except V2FactsError as error:
         raise ReportError(error.code, error.detail) from None
+    reader = None
+    read = None
     try:
+        reader = ReadOnlyCrawlState(database, connection=connection)
         facts = gather_facts(StateSource(reader, run_id))
+        read = connection.read_evidence()
     except CrawlStateUnreadable as error:
         raise ReportError(error.code, error.detail) from None
     finally:
-        reader.close()
+        if reader is not None:
+            reader.close()
+        else:
+            connection.close()
     scope = {"kind": "follow_run", "run_id": str(run_id), "database": str(database)}
     try:
         coverage = build_coverage(facts, scope=scope)
     except CoverageError as error:
         raise ReportError("facts_rejected", str(error)) from None
     payload = coverage.as_dict()
+    notes = {
+        "provider": "legacy",
+        "page_evidence": "present" if facts.get("pages") else "missing",
+    }
+    if read:
+        notes["read_mode"] = str((read.get("plan") or {}).get("mode") or "unknown")
+        notes["read_promise"] = str((read.get("source") or {}).get("promise") or "")
+        notes["read_note"] = str((read.get("source") or {}).get("note") or "")
     return {
         "question": "follow_coverage",
+        "provider": "legacy",
         "scope": payload["scope"],
         "coverage": payload,
-        "facts_notes": {"page_evidence": "present" if facts.get("pages") else "missing"},
+        "facts_notes": notes,
+        "read": read,
         "exit_code": coverage_exit_code(payload["overall"]),
     }
 
@@ -312,7 +335,11 @@ def coverage_lines(report: Mapping[str, Any]) -> list[str]:
     """The human text: the engine's own sentences, not a second set of words."""
     lines = list(render(report["coverage"]))
     provider = report["facts_notes"].get("provider", "legacy")
-    source = "V2 任务库（只读）" if provider == "v2" else "旧运行状态库（只读，legacy）"
+    # The word "read-only" alone was a claim this command could not always keep:
+    # on a quiescent WAL store the old reader created its -wal/-shm.  The promise
+    # is printed by _read_note from the measured plan, so the sentence here names
+    # the source and leaves the read facts to that line.
+    source = "V2 任务库" if provider == "v2" else "旧运行状态库（legacy）"
     lines.append(
         "数据来源: %s。页级证据: %s。"
         % (
