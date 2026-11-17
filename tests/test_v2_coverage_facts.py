@@ -72,17 +72,32 @@ def test_observed_pages_use_the_artifact_digest_and_are_counted_as_saved(tmp_pat
 
 
 def test_counts_are_real_numbers_not_placeholders(tmp_path):
+    """Every number here is measured, and the two *populations* are kept apart.
+
+    RA-03: this job is a follow walk that never recorded a snapshot selection
+    (the fixture accepts a source page directly), so the artists it really
+    reached (1) and the size of the whole cohort are different facts.  Writing
+    the reached count as "the total" was the old semantics; the total is unknown
+    and says so, while the measured counts stay real numbers.
+    """
     library, job = _finished_job(tmp_path, pages=3)
     facts = _facts(library, job["job_id"])
     totals = facts["run"]["totals"]
     assert totals == {
-        "artists_total": 1,
+        "artists_total": None,
+        "artists_visited": 1,
+        "artists_total_state": "unknown",
+        "artists_members": None,
+        "artists_members_active": None,
         "works_seen": 1,
+        "works_multi_batch": 0,
         "excluded_by_filter": 0,
         "unknown_fields": 0,
+        "unknown_artists_reason": "snapshot_selection_not_recorded",
     }
     assert facts["artists"][0]["artist_id"] == "7"
     assert facts["artists"][0]["state"] == "completed"
+    assert facts["artists"][0]["visited"] is True
 
 
 def test_a_run_that_is_still_running_is_not_reported_as_complete(tmp_path):

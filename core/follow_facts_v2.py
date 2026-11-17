@@ -750,12 +750,419 @@ def _required_pages(value: object, page_count: object) -> tuple[int, ...] | None
     return None
 
 
-def coverage_facts(connection: sqlite3.Connection, job_id: object) -> dict[str, Any]:
+#: Event kinds this module reconstructs a job's real relations from.  They are
+#: written by the follow repository (core/follow_repository.py) and are the only
+#: record of *which* snapshot a job walked and which artists it reached.
+SNAPSHOT_SELECTED_EVENT = "follow_snapshot_selected"
+ARTIST_ADMITTED_EVENT = "source_artist_admitted"
+
+#: One IN(...) list never carries more ids than this.  SQLite's default limit is
+#: 999 bound parameters, and a job can own more batches than that after a long
+#: series of resumes, so the queries are chunked instead of assumed small.
+_SQL_CHUNK = 400
+
+#: What kind of artist cohort this job has.  The three answers differ: a
+#: snapshot gives the frozen member set, a non-follow job enumerates its own
+#: artists, and a follow job that recorded no snapshot has an *unknown* cohort -
+#: which is why artists_total is None there and never 0.
+SCOPE_SNAPSHOT = "snapshot"
+SCOPE_NOT_APPLICABLE = "not_applicable"
+SCOPE_UNKNOWN = "unknown"
+
+#: How heavy an artist-level result_state is.  One unfinished work keeps its
+#: artist unfinished, and a later completed row cannot hide an earlier failure;
+#: filtering is a finished walk (0) but is still distinguished from a save.
+_HEAVY = {"completed": 0, "empty": 0, "pending": 1, "deferred": 2, "failed": 3}
+
+
+def _chunks(values, size: int = _SQL_CHUNK):
+    """Split one id list into query-sized pieces; never an unbounded IN(...)."""
+    items = list(values)
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
+
+
+def _stream(connection, sql: str, params: tuple = (), *, stop: object = None, every: int = 500):
+    """Rows one at a time, with a stop check every few hundred.
+
+    A ten-thousand-work job is a real shape (a followed artist can have that
+    many works), and materialising every row of it would make the report's
+    memory a function of the library size.  The caller still owns the read
+    transaction; this only avoids the list.
+    """
+    try:
+        cursor = connection.execute(sql, params)
+    except sqlite3.Error as error:
+        raise V2FactsError("query_failed", error) from None
+    seen = 0
+    while True:
+        try:
+            row = cursor.fetchone()
+        except sqlite3.Error as error:
+            raise V2FactsError("query_failed", error) from None
+        if row is None:
+            return
+        seen += 1
+        if every and seen % every == 0:
+            _check_stop(stop, "coverage_facts")
+        yield row
+
+
+def _request_source(job) -> str:
+    """The request's source ("follow", "artist", ...) or "" when unreadable.
+
+    Only used to tell "this job never had a follow cohort" from "this job had
+    one and did not record which snapshot it used": the two are different
+    unknowns and must not be merged.
+    """
+    try:
+        payload = json.loads(str(job["request_json"]))
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(payload, Mapping):
+        return ""
+    query = payload.get("query")
+    if not isinstance(query, Mapping):
+        return ""
+    return str(query.get("source") or "")
+
+
+def _selected_snapshot(connection, job_id: str):
+    """The snapshot this job said it was walking, from its own event stream.
+
+    _begin_follow_snapshot records {batch_id, fingerprint, snapshot_id} as a
+    follow_snapshot_selected event, whether it created a new snapshot or reused
+    the account's latest one.  That event - not "the newest snapshot in the
+    table" - is the only honest answer to "which member set did this job use":
+    the newest snapshot may belong to a later job entirely.
+    """
+    rows = _rows(
+        connection,
+        "SELECT batch_id, json_extract(safe_payload,'$.snapshot_id') AS snapshot_id "
+        "FROM events WHERE job_id = ? AND kind = ? ORDER BY event_seq DESC LIMIT 1",
+        (job_id, SNAPSHOT_SELECTED_EVENT),
+    )
+    if not rows:
+        return None
+    snapshot_id = rows[0]["snapshot_id"]
+    if not isinstance(snapshot_id, str) or not snapshot_id.strip():
+        raise V2FactsError("snapshot_event_invalid", rows[0]["batch_id"])
+    return {"snapshot_id": snapshot_id.strip(), "batch_id": rows[0]["batch_id"]}
+
+
+def _snapshot_scope(connection, job) -> dict[str, Any]:
+    """Which cohort this job walked, and how sure we are that it is the cohort."""
+    job_id = str(job["job_id"])
+    account_ref = str(job["account_ref"])
+    selected = _selected_snapshot(connection, job_id)
+    if selected is None:
+        if _request_source(job) != "follow":
+            return {
+                "scope": SCOPE_NOT_APPLICABLE,
+                "reason": "request_is_not_a_follow_walk",
+                "snapshot_id": "",
+                "batch_id": "",
+                "state": "",
+                "coverage_complete": None,
+                "members": None,
+                "members_active": None,
+            }
+        return {
+            "scope": SCOPE_UNKNOWN,
+            "reason": "snapshot_selection_not_recorded",
+            "snapshot_id": "",
+            "batch_id": "",
+            "state": "",
+            "coverage_complete": None,
+            "members": None,
+            "members_active": None,
+        }
+    rows = _rows(
+        connection,
+        "SELECT snapshot_id, account_ref, origin_job_id, state, expected_total, "
+        "coverage_complete FROM follow_snapshots WHERE snapshot_id = ?",
+        (selected["snapshot_id"],),
+    )
+    if not rows:
+        return {
+            "scope": SCOPE_UNKNOWN,
+            "reason": "snapshot_event_names_a_missing_snapshot",
+            "snapshot_id": selected["snapshot_id"],
+            "batch_id": selected["batch_id"],
+            "state": "",
+            "coverage_complete": None,
+            "members": None,
+            "members_active": None,
+        }
+    row = rows[0]
+    if str(row["account_ref"]) != account_ref:
+        # A snapshot of another account is a different cohort: counting its
+        # members here would answer about somebody else's follows.
+        return {
+            "scope": SCOPE_UNKNOWN,
+            "reason": "snapshot_belongs_to_another_account",
+            "snapshot_id": selected["snapshot_id"],
+            "batch_id": selected["batch_id"],
+            "state": str(row["state"]),
+            "coverage_complete": row["coverage_complete"],
+            "members": None,
+            "members_active": None,
+        }
+    members = _rows(
+        connection,
+        "SELECT m.artist_id, m.display_name, m.ordinal, "
+        "a.is_following AS is_following FROM follow_snapshot_members AS m "
+        "LEFT JOIN follow_artists AS a "
+        "ON a.account_ref = ? AND a.artist_id = m.artist_id "
+        "WHERE m.snapshot_id = ? ORDER BY m.ordinal",
+        (account_ref, selected["snapshot_id"]),
+    )
+    return {
+        "scope": SCOPE_SNAPSHOT,
+        "reason": "",
+        "snapshot_id": selected["snapshot_id"],
+        "batch_id": selected["batch_id"],
+        "state": str(row["state"]),
+        "coverage_complete": row["coverage_complete"],
+        "members": len(members),
+        "members_active": sum(1 for item in members if item["is_following"]),
+        "rows": members,
+    }
+
+
+def _admitted_artists(connection, job_id: str, *, stop: object = None) -> set[str]:
+    """Artists this job provably reached, even when they produced no work row.
+
+    Two records exist and neither is "a batch_items row": admit_source_artist
+    writes a source_artist_admitted event, and a walked artist leaves a
+    checkpoint.  Without them, "no works row" and "never visited" would be the
+    same fact - which is exactly the missing-artist hole of RA-03.
+    """
+    reached: set[str] = set()
+    for row in _stream(
+        connection,
+        "SELECT json_extract(safe_payload,'$.artist_id') AS artist_id "
+        "FROM events WHERE job_id = ? AND kind = ?",
+        (job_id, ARTIST_ADMITTED_EVENT),
+        stop=stop,
+    ):
+        value = row["artist_id"]
+        if isinstance(value, str) and value:
+            reached.add(value)
+    for row in _stream(
+        connection, "SELECT artist_id, entity_id FROM checkpoints WHERE job_id = ?",
+        (job_id,), stop=stop,
+    ):
+        for name in ("artist_id", "entity_id"):
+            value = row[name]
+            if isinstance(value, str) and value:
+                reached.add(value)
+    return reached
+
+
+def _cohort_total(scope: Mapping[str, Any], count: int):
+    """(total | None, state, reason): the only three answers a cohort can have.
+
+    A *complete* follow snapshot is the cohort, so its member count is a real
+    denominator.  Everything else is an unknown denominator, and the reason says
+    which unknown it is, because "the job recorded no snapshot", "the snapshot
+    was still being built", and "this is not a follow walk at all" are three
+    different facts that must not collapse into one blank:
+
+        complete snapshot      -> count, "recorded", ""
+        building / uncertain   -> None,  "unknown",  "snapshot_not_complete:<state>"
+        not a follow walk      -> None,  "unknown",  "snapshot_scope_not_applicable"
+        no snapshot recorded   -> None,  "unknown",  scope reason
+    """
+    if scope["scope"] == SCOPE_SNAPSHOT:
+        complete = (
+            str(scope["state"]) == "complete"
+            and int(scope["coverage_complete"] or 0) == 1
+        )
+        if complete:
+            return count, "recorded", ""
+        return None, "unknown", "snapshot_not_complete:%s" % (str(scope["state"]) or "unknown")
+    if scope["scope"] == SCOPE_NOT_APPLICABLE:
+        return None, "unknown", "snapshot_scope_not_applicable"
+    return None, "unknown", str(scope["reason"] or "snapshot_selection_not_recorded")
+
+
+def _batches(connection, job_id: str) -> list:
+    """The job's batches in the order the contract fixes: created_at, batch_id."""
+    return _rows(
+        connection,
+        "SELECT batch_id, phase, stop_reason, coverage_complete, created_at "
+        "FROM batches WHERE job_id = ? ORDER BY created_at, batch_id",
+        (job_id,),
+    )
+
+
+def _items(connection, batch_ids: list, *, stop: object = None) -> list:
+    """Every batch_items row of this job, in one pass per chunk of batches."""
+    items: list = []
+    for chunk in _chunks(batch_ids):
+        marks = ",".join("?" for _ in chunk)
+        items.extend(
+            _stream(
+                connection,
+                "SELECT batch_id, illust_id, artist_id, page_count, decision, "
+                "required_pages_json, result_state FROM batch_items "
+                "WHERE batch_id IN (%s)" % marks,
+                tuple(chunk),
+                stop=stop,
+            )
+        )
+    return items
+
+
+def _work_groups(items: list, order: dict) -> dict[str, list]:
+    """illust_id -> its rows, oldest batch first (the representative is last)."""
+    groups: dict[str, list] = {}
+    for item in items:
+        groups.setdefault(str(item["illust_id"]), []).append(item)
+    for rows in groups.values():
+        rows.sort(key=lambda row: (order[str(row["batch_id"])], str(row["batch_id"])))
+    return groups
+
+
+def _group_conflict(rows: list, created: dict) -> bool:
+    """Two rows of one work taken at the same moment that disagree about it.
+
+    A later batch overriding an earlier decision is an ordinary supersede, not a
+    contradiction.  Two batches created in the same instant (same created_at)
+    that decide differently are a contradiction: no order between them is
+    justified by the data, so it is counted instead of silently picking one.
+    """
+    seen: dict[str, str] = {}
+    for row in rows:
+        stamp = created.get(str(row["batch_id"]), "")
+        decision = str(row["decision"])
+        if stamp and stamp in seen and seen[stamp] != decision:
+            return True
+        seen.setdefault(stamp, decision)
+    return False
+
+
+def _pages_of(rows: list):
+    """The newest page list this work records, or None when none of them does.
+
+    The representative row decides the work's fate, but a resumed row may have
+    been written without a page list; the newest row that does record one is
+    still the honest expected page set for the work.
+    """
+    for row in reversed(rows):
+        if str(row["decision"]) != "download":
+            continue
+        pages = _required_pages(row["required_pages_json"], row["page_count"])
+        if pages is not None:
+            return pages
+    return None
+
+
+def _links(connection, batch_ids: list, job_id: str, *, stop: object = None) -> dict:
+    """(illust_id, page) -> every selected-page link this job's batches carry.
+
+    The link row (batch_item_pages) is the only place that says which page of
+    which work this batch selected, and it may point at a delivery of this job,
+    at a delivery another job completed, or at nothing but an artifact (the carry
+    path).  Reading deliveries by job_id instead - the previous behaviour -
+    cannot see the artifact-only link at all, which is RA-03's third case.
+    """
+    found: dict[tuple, list] = {}
+    for chunk in _chunks(batch_ids):
+        marks = ",".join("?" for _ in chunk)
+        for row in _stream(
+            connection,
+            "SELECT bip.batch_id, bip.illust_id, bip.page_index, "
+            "bip.delivery_id, bip.artifact_id, "
+            "d.state AS delivery_state, d.generation AS delivery_generation, "
+            "d.job_id AS delivery_job, "
+            "a.sha256 AS artifact_sha256, a.job_id AS artifact_job, "
+            "a.verification AS artifact_verification "
+            "FROM batch_item_pages AS bip "
+            "LEFT JOIN deliveries AS d ON d.delivery_id = bip.delivery_id "
+            "LEFT JOIN artifacts AS a ON a.artifact_id = bip.artifact_id "
+            "WHERE bip.batch_id IN (%s)" % marks,
+            tuple(chunk),
+            stop=stop,
+        ):
+            key = (str(row["illust_id"]), int(row["page_index"]))
+            found.setdefault(key, []).append(row)
+    return found
+
+
+def _link_entry(row, job_id: str, unmapped: set) -> dict[str, Any] | None:
+    """One observed page from one link row, or None when the link says nothing.
+
+    A delivery state is the strongest fact and is mapped through PAGE_STATE; an
+    unknown state stays a parked page and its name is recorded.  A link with no
+    delivery is an artifact-only reference (a page another job saved and this one
+    carried): the artifact proves the bytes were captured and hashed, so it is a
+    save that already happened - but only when its verification says so.
+    """
+    raw = row["delivery_state"]
+    if raw is not None and str(raw):
+        state = PAGE_STATE.get(str(raw))
+        if state is None:
+            state = PENDING_PAGE
+            if str(raw) not in PENDING_STATES:
+                unmapped.add(str(raw))
+        link = "delivery"
+        owner = row["delivery_job"]
+    elif row["artifact_id"] is not None:
+        verification = str(row["artifact_verification"] or "")
+        state = "already_verified" if verification == "structure_checked" else PENDING_PAGE
+        if verification != "structure_checked" and verification:
+            unmapped.add("artifact_verification:" + verification)
+        link = "artifact"
+        owner = row["artifact_job"]
+    else:
+        # The table's CHECK forbids a row with neither link; a row that has
+        # neither after the joins means the delivery/artifact itself is gone.
+        return None
+    digest = row["artifact_sha256"]
+    return {
+        "work_id": str(row["illust_id"]),
+        "page": int(row["page_index"]),
+        "state": state,
+        "content_sha256": str(digest) if digest else None,
+        "link": link,
+        "origin_job": "self" if (owner is None or str(owner) == job_id) else "other",
+    }
+
+
+def coverage_facts(
+    connection: sqlite3.Connection, job_id: object, *, stop: object = None
+) -> dict[str, Any]:
     """Build the coverage facts dict for one job from the V2 tables.
 
     The caller owns the transaction; this function only reads.  An empty cohort
     is a legitimate answer (a job that followed nobody), a job that is not in
     the table is not.
+
+    The facts follow the relations V2 actually records, not the shape the
+    summary used to assume (RA-03):
+
+        job -> batches -> batch_items        (works, one row per work per batch)
+        job -> events(follow_snapshot_selected) -> follow_snapshots
+            -> follow_snapshot_members       (the frozen artist cohort)
+        job -> events(source_artist_admitted) / checkpoints (who was reached)
+        batch -> batch_item_pages -> deliveries | artifacts   (selected pages)
+
+    Three consequences are deliberate:
+
+    * a work counts once per job even when several batches mention it (a resume
+      re-queues the same work), and the newest batch is the representative row;
+    * an artist the snapshot lists but this job never reached is reported with
+      works_seen=0 instead of disappearing from the cohort; and a follow job that
+      recorded no snapshot reports artists_total=None - never 0;
+    * a page observed through an artifact-only link (another job saved it and
+      this one carried it) is counted, with link="artifact" and origin_job.
+
+    Still unknown, and kept so: V2 stores no expected *content version* for a
+    work page (see the module docstring), so expected[].content_sha256 stays None
+    and the delivery dimension stays unknown.  Copying the observed digest into
+    the expected field would prove the page against itself.
     """
     if not isinstance(job_id, str) or not job_id.strip():
         raise V2FactsError("job_id_invalid", job_id)
@@ -768,75 +1175,80 @@ def coverage_facts(connection: sqlite3.Connection, job_id: object) -> dict[str, 
     if not jobs:
         raise V2FactsError("job_not_found", job_id)
     job = jobs[0]
-    batches = _rows(
-        connection,
-        "SELECT batch_id, phase, stop_reason, coverage_complete FROM batches "
-        "WHERE job_id = ? ORDER BY rowid",
-        (job_id,),
-    )
-    batch_ids = [row["batch_id"] for row in batches]
-    items: list = []
-    if batch_ids:
-        marks = ",".join("?" for _ in batch_ids)
-        items = _rows(
-            connection,
-            "SELECT batch_id, illust_id, artist_id, page_count, decision, "
-            "required_pages_json, result_state FROM batch_items "
-            "WHERE batch_id IN (%s) ORDER BY batch_id, illust_id" % marks,
-            tuple(batch_ids),
-        )
-    deliveries = {
-        (str(row["illust_id"]), int(row["page_index"])): row
-        for row in _rows(
-            connection,
-            "SELECT delivery_id, illust_id, page_index, state, generation, completed_batch_id "
-            "FROM deliveries WHERE job_id = ? ORDER BY generation",
-            (job_id,),
-        )
-    }
-    artifacts = {
-        row["delivery_id"]: row
-        for row in _rows(
-            connection,
-            "SELECT delivery_id, illust_id, page_index, sha256 FROM artifacts WHERE job_id = ?",
-            (job_id,),
-        )
-    }
+    batches = _batches(connection, job_id)
+    order = {str(row["batch_id"]): index for index, row in enumerate(batches)}
+    created = {str(row["batch_id"]): str(row["created_at"] or "") for row in batches}
+    batch_ids = [str(row["batch_id"]) for row in batches]
 
+    scope = _snapshot_scope(connection, job)
+    members = scope.pop("rows", []) or []
+    reached = _admitted_artists(connection, job_id, stop=stop) if batch_ids else set()
+    items = _items(connection, batch_ids, stop=stop) if batch_ids else []
+    groups = _work_groups(items, order)
+
+    # ---- works: one row per work, the newest batch represents it -----------
+    works_seen = len(groups)
+    multi_batch = 0
+    works_conflict = 0
+    superseded = 0
+    excluded = unknown_fields = 0
     expected: list[dict[str, Any]] = []
     page_gaps: list[str] = []
-    artists: dict[str, dict[str, Any]] = {}
-    works_seen = excluded = unknown_fields = 0
-    for item in items:
-        works_seen += 1
-        decision = str(item["decision"])
+    artist_works: dict[str, list] = {}
+    artist_rows: dict[str, dict[str, Any]] = {}
+    for work_id in sorted(groups):
+        rows = groups[work_id]
+        if len({str(row["batch_id"]) for row in rows}) > 1:
+            multi_batch += 1
+        if _group_conflict(rows, created):
+            works_conflict += 1
+        elif len({str(row["decision"]) for row in rows}) > 1:
+            superseded += 1
+        representative = rows[-1]
+        decision = str(representative["decision"])
         if decision == "filtered":
             excluded += 1
         elif decision == "metadata_unknown":
             unknown_fields += 1
-        artist_id = "" if item["artist_id"] is None else str(item["artist_id"])
+        artist_id = ""
+        for row in reversed(rows):
+            if row["artist_id"]:
+                artist_id = str(row["artist_id"])
+                break
         if artist_id:
-            entry = artists.setdefault(
-                artist_id, {"artist_id": artist_id, "state": "completed", "works_seen": 0}
+            artist_works.setdefault(artist_id, []).append(work_id)
+            entry = artist_rows.setdefault(
+                artist_id,
+                {
+                    "artist_id": artist_id,
+                    "state": "completed",
+                    "works_seen": 0,
+                    "visited": False,
+                    "visit_state": "not_visited",
+                    "in_snapshot": False,
+                    "following": None,
+                    "sources": ["items"],
+                    # Filled per deduplicated work, then resolved once below:
+                    # an artist is not "done" because its other works are.
+                    "_states": [],
+                },
             )
             entry["works_seen"] += 1
-            mapped = ARTIST_STATE.get(str(item["result_state"]), "deferred")
-            # One unfinished work is enough to keep the artist unfinished: the
-            # artist is not "done" just because its other works are.
-            if entry["state"] == "completed" and mapped != "completed":
-                entry["state"] = mapped
-            elif entry["state"] == "empty" and mapped in ("pending", "failed", "deferred"):
-                entry["state"] = mapped
+            entry["visited"] = True
+            entry["visit_state"] = "has_items"
+            entry["_states"].append(
+                ARTIST_STATE.get(str(representative["result_state"]), "deferred")
+            )
         if decision != "download":
             continue
-        pages = _required_pages(item["required_pages_json"], item["page_count"])
+        pages = _pages_of(rows)
         if pages is None:
-            page_gaps.append(str(item["illust_id"]))
+            page_gaps.append(work_id)
             continue
         for page in pages:
             expected.append(
                 {
-                    "work_id": str(item["illust_id"]),
+                    "work_id": work_id,
                     "page": page,
                     # Not "unknown because we forgot": V2 has no expected
                     # content version for a work page (see the module docstring).
@@ -844,46 +1256,136 @@ def coverage_facts(connection: sqlite3.Connection, job_id: object) -> dict[str, 
                 }
             )
 
+    # ---- the frozen cohort: snapshot members the job may not have reached ---
+    for member in members:
+        artist_id = str(member["artist_id"])
+        entry = artist_rows.get(artist_id)
+        if entry is None:
+            entry = artist_rows.setdefault(
+                artist_id,
+                {
+                    "artist_id": artist_id,
+                    "state": "pending",
+                    "works_seen": 0,
+                    "visited": False,
+                    "visit_state": "not_visited",
+                    "in_snapshot": True,
+                    "following": None,
+                    "sources": ["snapshot"],
+                },
+            )
+        entry["in_snapshot"] = True
+        entry["following"] = member["is_following"]
+        if "snapshot" not in entry["sources"]:
+            entry["sources"].append("snapshot")
+        if entry["visited"]:
+            continue
+        # No work row: either the job reached this artist and found nothing to
+        # download, or it never got there.  Both are stated, neither is a 0.
+        if artist_id in reached:
+            entry["visited"] = True
+            entry["visit_state"] = "visited_no_items"
+            entry["state"] = "empty"
+        else:
+            entry["state"] = "pending"
+            entry["visit_state"] = "not_visited"
+
+    for row in artist_rows.values():
+        states = row.pop("_states", [])
+        if not states:
+            # An artist the snapshot lists but this job never reached: the
+            # state was decided by the cohort loop above, not by any work row.
+            continue
+        heavy = max(states, key=lambda name: _HEAVY.get(name, 0))
+        row["state"] = (
+            heavy
+            if _HEAVY.get(heavy, 0) > 0
+            else ("empty" if all(name == "empty" for name in states) else "completed")
+        )
+    artists_rows = [artist_rows[key] for key in sorted(artist_rows)]
+    visited = sum(1 for row in artists_rows if row["visited"])
+    total, total_state, total_reason = _cohort_total(scope, len(artists_rows))
+    totals = {
+        "artists_total": total,
+        "artists_visited": visited,
+        "artists_total_state": total_state,
+        "artists_members": scope["members"],
+        "artists_members_active": scope["members_active"],
+        "works_seen": works_seen,
+        "works_multi_batch": multi_batch,
+        "excluded_by_filter": excluded,
+        "unknown_fields": unknown_fields,
+        # Always present: "" when the denominator is known, otherwise the code
+        # that says which of the three unknowns this is.  A missing key would
+        # make a consumer guess, and guessing here means writing 0.
+        "unknown_artists_reason": total_reason,
+    }
+
+    # ---- observed pages: through the selected-page links --------------------
     observed: list[dict[str, Any]] = []
     unmapped: set[str] = set()
-    for (illust_id, page_index), row in sorted(deliveries.items()):
-        raw_state = str(row["state"])
-        state = PAGE_STATE.get(raw_state)
+    links = _links(connection, batch_ids, job_id, stop=stop) if batch_ids else {}
+    expected_keys = {(item["work_id"], item["page"]) for item in expected}
+    seen_observations: set[tuple] = set()
+    for key in sorted(links):
+        for row in links[key]:
+            entry = _link_entry(row, job_id, unmapped)
+            if entry is None:
+                continue
+            # Two batches naming the *same* delivery are one observation written
+            # twice (a resume re-links the page); only a genuinely different
+            # observation - another delivery, another digest - is a second one,
+            # and that is what the engine must keep apart and park.
+            signature = (
+                entry["work_id"], entry["page"], entry["state"],
+                entry["content_sha256"], entry["link"], entry["origin_job"],
+            )
+            if signature in seen_observations:
+                continue
+            seen_observations.add(signature)
+            observed.append(entry)
+    # A delivery this job completed but never linked (older rows, or a batch
+    # whose link was written later) is still a saved page: it is counted, and
+    # named so the report can say the link is missing rather than pretend the
+    # page was never saved.
+    linked = {key for key in links}
+    unlinked = 0
+    for row in _stream(
+        connection,
+        "SELECT delivery_id, illust_id, page_index, state FROM deliveries WHERE job_id = ?",
+        (job_id,),
+        stop=stop,
+    ):
+        key = (str(row["illust_id"]), int(row["page_index"]))
+        if key in linked or key not in expected_keys:
+            continue
+        raw = str(row["state"])
+        state = PAGE_STATE.get(raw)
         if state is None:
-            # An unknown state is not evidence of "waiting for a look", so the
-            # name is recorded as well: the page is parked, but the report can
-            # say which state V2 used instead of pretending it recognised it.
             state = PENDING_PAGE
-            if raw_state not in PENDING_STATES:
-                unmapped.add(raw_state)
-        artifact = artifacts.get(str(row["delivery_id"]))
+            if raw not in PENDING_STATES:
+                unmapped.add(raw)
+        unlinked += 1
         observed.append(
             {
-                "work_id": illust_id,
-                "page": page_index,
+                "work_id": key[0],
+                "page": key[1],
                 "state": state,
-                # The digest of the file this run saved.  It is an *observed*
-                # version; the expected one is not recorded anywhere in V2.
-                "content_sha256": (
-                    str(artifact["sha256"])
-                    if artifact is not None and artifact["sha256"]
-                    else None
-                ),
+                "content_sha256": None,
+                "link": "delivery_unlinked",
+                "origin_job": "self",
             }
         )
 
-    artists_rows = [artists[key] for key in sorted(artists)]
     incomplete = [
-        {"artist_id": row["artist_id"], "reason": "state_%s" % row["state"]}
+        {
+            "artist_id": row["artist_id"],
+            # "not reached" and "reached, still unfinished" are different gaps.
+            "reason": "not_visited" if not row["visited"] else "state_%s" % row["state"],
+        }
         for row in artists_rows
         if row["state"] not in ("completed", "empty")
     ]
-    totals = {
-        "artists_total": len(artists_rows),
-        "works_seen": works_seen,
-        "excluded_by_filter": excluded,
-        "unknown_fields": unknown_fields,
-    }
     stop_reason = ""
     for row in batches:
         if row["stop_reason"]:
@@ -896,12 +1398,27 @@ def coverage_facts(connection: sqlite3.Connection, job_id: object) -> dict[str, 
         "stop_reason": stop_reason,
         "totals": totals,
     }
+    pages: dict[str, Any] = {
+        "expected": expected,
+        "observed": observed,
+        "links": {
+            "linked_pages": len(links),
+            "unlinked_deliveries": unlinked,
+            "artifact_only": sum(
+                1 for entry in observed if entry.get("link") == "artifact"
+            ),
+            "from_another_job": sum(
+                1 for entry in observed if entry.get("origin_job") == "other"
+            ),
+        },
+    }
     facts: dict[str, Any] = {
         "run": run,
         "artists": artists_rows,
         "incomplete": incomplete,
         "budget": None,
-        "pages": {"expected": expected, "observed": observed},
+        "snapshot": scope,
+        "pages": pages,
         "page_end_evidence": _page_end(batches, page_gaps),
     }
     if page_gaps:
@@ -914,11 +1431,16 @@ def coverage_facts(connection: sqlite3.Connection, job_id: object) -> dict[str, 
     # The filtered works are already the excluded_by_filter counter, so they are
     # not part of the difference this number explains.
     facts["works_without_expected_pages"] = sum(
-        1
-        for item in items
-        if str(item["decision"]) not in ("download", "filtered")
+        1 for work_id in groups if str(groups[work_id][-1]["decision"]) not in ("download", "filtered")
     )
+    if multi_batch:
+        facts["works_multi_batch"] = multi_batch
+    if works_conflict:
+        facts["works_conflict"] = works_conflict
+    if superseded:
+        facts["works_superseded"] = superseded
     return facts
+
 
 
 def _page_end(batches: list, page_gaps: list) -> dict[str, str]:
