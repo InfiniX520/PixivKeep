@@ -377,6 +377,28 @@ def test_scope_plan_without_an_account_exits_five_and_says_so(tmp_path, capsys):
     assert "无法核对账号来源" in out
 
 
+def test_scope_plan_refuses_a_snapshot_with_an_unusable_account(tmp_path, capsys):
+    # The field is not optional decoration: a value that is present but unusable
+    # is a broken snapshot, and the command says which field broke.
+    snap = write(tmp_path, "snap.json", snapshot(account=12345))
+    code = main(["scope-plan", "--snapshot", str(snap), "--group", "g"])
+    captured = capsys.readouterr()
+    assert code == 3
+    assert "snapshot_account_invalid" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_a_dump_with_an_unusable_account_is_refused_by_name(tmp_path, capsys):
+    dump = scope_of().as_dict()
+    dump["account_id"] = 12345
+    scope_path = write(tmp_path, "scope.json", dump)
+    _snap, batch, decisions = plan_inputs(tmp_path)
+    code = main(report_args(tmp_path, batch, decisions, scope_path))
+    captured = capsys.readouterr()
+    assert code == 3
+    assert "scope_invalid:scope_account_invalid" in captured.err
+
+
 def test_the_two_commands_round_trip_through_json(tmp_path, capsys):
     snap, batch, decisions = plan_inputs(tmp_path)
     assert main(scope_plan(tmp_path, snap)) == 0
