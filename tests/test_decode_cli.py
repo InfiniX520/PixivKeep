@@ -109,7 +109,7 @@ def test_an_unmeasured_receipt_reads_as_unknown_not_as_none(tmp_path, capsys):
     assert "None" not in printed
 
 
-def _report(state="ok", stability="unchanged", reason=None):
+def _report(state="ok", stability="unchanged", reason=None, content_bound=True):
     return {
         "path": "x.png",
         "quality": {"structure": {"state": state}, "decode": {"state": state}, "pages": {}},
@@ -117,6 +117,17 @@ def _report(state="ok", stability="unchanged", reason=None):
         "path_stability_reason": reason,
         "receipt": None,
         "unchanged": True,
+        # A verdict now has to name the bytes it is about (RA-06): the hand-made
+        # report carries the content block the real one always has.
+        "content": {
+            "state": "observed" if content_bound else "unknown",
+            "sha256": "a" * 64 if content_bound else None,
+            "bytes": 12 if content_bound else None,
+            "complete": bool(content_bound),
+            "source": "file_stream",
+            "reason": "" if content_bound else "content_unbound",
+        },
+        "content_bound": content_bound,
     }
 
 
@@ -126,6 +137,25 @@ def test_a_verdict_only_counts_when_the_path_still_holds_the_same_bytes():
     assert _decode_outcome([_report()]) == 0
     assert _decode_outcome([_report(stability="changed")]) == 5
     assert _decode_outcome([_report(stability="unknown")]) == 5
+
+
+def test_a_verdict_without_a_content_binding_is_not_a_pass():
+    """A decode that cannot name the bytes it read is not a pass (RA-06).
+
+    The five dimensions can all say ok while the content block says the bytes are
+    unknown; that combination has to end in 5, not 0.
+    """
+    from core.library_maintenance import _decode_outcome
+
+    assert _decode_outcome([_report()]) == 0
+    assert _decode_outcome([_report(content_bound=False)]) == 5
+
+    # And a report written before the content block existed is not silently
+    # upgraded into a pass either.
+    legacy = _report()
+    legacy.pop("content_bound")
+    legacy.pop("content")
+    assert _decode_outcome([legacy]) == 5
 
 
 def test_a_report_without_a_stability_field_is_not_a_pass():
