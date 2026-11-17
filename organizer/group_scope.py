@@ -98,23 +98,24 @@ def _fingerprint(sides, blocks):
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _account(value):
+def _account(value, *, code="snapshot_account_invalid"):
     """The account a snapshot names, or "" when the export never recorded one.
 
     An export written before the account was exported, or one that lost the
     field, is not an account: "" is the honest answer and the report turns it
-    into an unknown.  A value that is present but unusable is a broken snapshot,
-    not a scope without provenance.
+    into an unknown.  A value that is present but unusable is a broken snapshot
+    (or a broken dump), not a scope without provenance, so it is named by the
+    caller's vocabulary instead of being folded into silence.
     """
     if value is None:
         return ""
     if not isinstance(value, str):
-        raise OrganizerError("snapshot_account_invalid")
+        raise OrganizerError(code)
     cleaned = value.strip()
     if not cleaned:
         return ""
     if len(cleaned) > 128 or any(ord(item) < 32 for item in cleaned):
-        raise OrganizerError("snapshot_account_invalid")
+        raise OrganizerError(code)
     return cleaned
 
 
@@ -356,10 +357,15 @@ class GroupScope:
         # first-class field because a caller building a scope by hand would
         # otherwise have only the free-form source bag to carry it, and a
         # consumer that skips the bag would silently lose the gate (RA-05).
-        declared = "" if source is None else str(source.get("account_id") or "").strip()
-        account = _account(account_id) if account_id else ""
+        # Both places speak the same vocabulary as a dump would: a bad value is
+        # a scope error here, a snapshot error in build_scope.
+        declared = _account(
+            None if source is None else source.get("account_id"),
+            code="scope_account_invalid",
+        )
+        account = _account(account_id, code="scope_account_invalid") if account_id else ""
         if not account:
-            account = _account(declared) if declared else ""
+            account = declared
         elif declared and declared != account:
             # Two places name the account and they disagree: this dump does not
             # describe one catalog, so it is not a scope.
@@ -538,6 +544,9 @@ def build_scope(snapshot, *, groups, kind="group_download"):
     artists = snapshot.get("artists")
     if not isinstance(artists, Mapping):
         raise OrganizerError("snapshot_artists_missing")
+    # Read first, so a broken account field is reported as the snapshot problem
+    # it is instead of surfacing later as a scope-construction error.
+    account = _account(snapshot.get("account_id"))
     known = _known_pairs(snapshot)
     wanted = _requested_groups(groups, known)
 
@@ -596,7 +605,7 @@ def build_scope(snapshot, *, groups, kind="group_download"):
         snapshot_id=str(snapshot.get("id") or ""),
         # Whose catalog this member set belongs to.  Absent in an export that
         # never recorded it: "" is unknown, never "same as the batch" (RA-05).
-        account_id=snapshot.get("account_id") or "",
+        account_id=account,
         group_pairs=wanted,
         artist_ids=ordered,
         sides=sides,

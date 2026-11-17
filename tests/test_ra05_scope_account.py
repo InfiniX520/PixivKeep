@@ -161,6 +161,22 @@ def test_a_dump_without_an_account_still_loads_and_cannot_claim_one():
     assert restored.source["identity_fingerprint"] != scope_of().source["identity_fingerprint"]
 
 
+def test_the_constructor_names_a_bad_account_in_its_own_vocabulary():
+    assert code_of(lambda: GroupScope(
+        kind="group_download",
+        snapshot_id="snap-1",
+        account_id=12345,
+        group_pairs=(("show", "g"),),
+        artist_ids=("1",),
+        sides=("show",),
+        blocks=(("show", ("1",)),),
+        overlap={},
+        source={"visibility": "show"},
+        completeness="complete",
+        unknown_reason="",
+    )) == "scope_account_invalid"
+
+
 def test_the_constructor_refuses_two_different_accounts():
     source = {"visibility": "show", "account_id": OTHER}
     assert code_of(lambda: GroupScope(
