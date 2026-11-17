@@ -308,16 +308,22 @@ def test_ensure_current_refuses_a_moved_account():
     assert code_of(lambda: ensure_current(before, snapshot(account=OTHER))) == "scope_account_changed"
 
 
-def test_ensure_current_upgrades_a_legacy_scope_instead_of_stranding_it():
-    # A dump written before the account was exported cannot name one; the next
-    # snapshot can.  The evidence got stronger, so the task continues and the
-    # returned scope is the one that now carries the account.
+def test_ensure_current_does_not_invent_an_account_for_a_legacy_scope():
+    # A dump written before the account was exported cannot name one.  A later
+    # snapshot naming an account does not prove the old evidence came from that
+    # account: the same members and the same label are not an identity chain
+    # (R4-02, S0_CONTRACTS_R4 section 2).  The refreshed members and evidence are
+    # adopted; the identity is left exactly as the caller's scope stated it.
     before = scope_of(account=None)
     assert before.account_id == ""
     fresh = ensure_current(before, snapshot())
-    assert fresh.account_id == ACCOUNT
-    assert fresh.account_id_state == "recorded"
+    assert fresh.account_id == ""
+    assert fresh.account_id_state == "not_recorded"
     assert fresh.fingerprint == before.fingerprint
+    # and the report cannot move the account to "matched" on the strength of it
+    report = build_report(batch_of(snapshot_id=""), [decision("1"), decision("2")], fresh)
+    assert report["proof_limits"]["account"] == "unknown"
+    assert report["proof_limits"]["complete"] is False
 
 
 def test_ensure_current_refuses_a_snapshot_that_lost_the_account():
