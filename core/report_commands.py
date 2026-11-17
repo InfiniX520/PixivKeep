@@ -33,7 +33,6 @@ from core.follow_facts_v2 import (
     V2FactsError,
     coverage_facts,
     read_only_connection,
-    read_only_mode,
 )
 from core.follow_coverage_text import render
 from core.follow_facts import StateSource, gather_facts
@@ -117,7 +116,32 @@ def _file_stamp(path: Path) -> tuple[int, int]:
     return (int(info.st_size), int(info.st_mtime_ns))
 
 
-def coverage_report_v2(database: Path, job_id: str) -> dict[str, Any]:
+def _read_note(read: Mapping[str, Any]) -> str:
+    """One sentence about what this read promised and how it kept it.
+
+    The coverage command answers about a file it did not write, so the report
+    has to say which of the two promises it made: a direct locking read of a
+    live database (where SQLite updates its own -shm index) or a read of a
+    private copy (where the source directory is not touched at all).
+    """
+    plan = read.get("plan") or {}
+    mode = str(plan.get("mode") or "")
+    if mode == "copy":
+        members = ", ".join(sorted((plan.get("copy") or {}).get("members") or {}))
+        return (
+            "读取方式: 私有副本（把 %s 复制到临时目录后读取；源目录前后名字与属性未变，"
+            "副本在关闭时删除）" % (members or "主文件")
+        )
+    if mode == "ro+immutable":
+        return "读取方式: 调用方声明的冻结副本（immutable，不参与锁；读取前后主文件属性一致）"
+    if plan.get("promise") == "names_only":
+        return "读取方式: 直接只读（加入 SQLite 锁协议；源库名字未变，-shm 锁索引由 SQLite 更新）"
+    return "读取方式: 直接只读（rollback 库；未新建或删除任何文件）"
+
+
+def coverage_report_v2(
+    database: Path, job_id: str, *, immutable_source: str = ""
+) -> dict[str, Any]:
     """Build the coverage summary for one V2 job, read-only.
 
     This is the summary the current downloader feeds: the legacy crawl store has
@@ -127,34 +151,53 @@ def coverage_report_v2(database: Path, job_id: str) -> dict[str, Any]:
     and does not record).
 
     The result names its provider, so a reader can tell a legacy answer from a
-    V2 answer without guessing which database was opened.
+    V2 answer without guessing which database was opened, and it carries the
+    read plan: which mode was used, what it promised about the source file
+    family, and what was measured afterwards (RA-02).  The two promises are not
+    the same thing: a live WAL database is read through the locking protocol and
+    SQLite updates its own -shm index, while a quiescent WAL database is read
+    from a private copy so the library directory gains no file at all.
+
+    immutable_source is only for a snapshot the *caller* owns and has frozen;
+    it is the one mode that skips locking, so it may never be inferred here.
     """
     try:
-        connection = read_only_connection(database)
+        connection = read_only_connection(database, immutable_source=immutable_source)
     except V2FactsError as error:
         raise ReportError(error.code, error.detail) from None
-    # A report about a file another process may be rewriting has to know whether
-    # the bytes stayed put while it read them.  A quiescent store is opened
-    # immutable (no lock, no index file), so the only defence left is to compare
-    # the file before and after: a main file that changed under the read means
-    # the numbers describe no single moment.
-    mode = read_only_mode(database)
-    before = _file_stamp(database)
+    plan = connection.plan
+    stamp_before = _file_stamp(database) if plan.mode == READ_ONLY_IMMUTABLE else None
+    read: dict[str, Any] = {}
     try:
         connection.execute("BEGIN")
         facts = coverage_facts(connection, job_id)
         connection.execute("COMMIT")
+        # Measured while the connection is still open: a live database may
+        # checkpoint when the last connection closes, and that is not this
+        # run's side effect.
+        read = connection.read_evidence()
     except V2FactsError as error:
         raise ReportError(error.code, error.detail) from None
     except ReportError:
         raise
     finally:
         connection.close()
-    # Only the immutable read needs this: it holds no lock, so the file is the
-    # only thing that can tell us whether the bytes moved.  A locking read
-    # (mode=ro) already sees one consistent snapshot, and a concurrent
-    # checkpoint there is not a reason to refuse the report.
-    if mode == READ_ONLY_IMMUTABLE and _file_stamp(database) != before:
+    source = read.get("source") or {}
+    appeared = list(source.get("created") or []) + list(source.get("removed") or [])
+    if appeared:
+        # The plan promised the source file family keeps its names.  A name that
+        # appeared or vanished while we read means the promise did not hold,
+        # whoever caused it; a summary built over that window is not a claim
+        # about one directory.
+        raise ReportError(
+            "source_side_effects_observed",
+            "读取期间源文件族的名字发生变化: %s" % ", ".join(sorted(appeared)),
+        )
+    if plan.mode == READ_ONLY_IMMUTABLE and _file_stamp(database) != stamp_before:
+        # Only an immutable read needs this: it holds no lock, so the main file
+        # moving means the numbers describe no single moment.  A locking read
+        # (mode=ro) already sees one consistent snapshot and a concurrent commit
+        # there is not a reason to refuse the report.
         raise ReportError(
             "database_changed_during_read",
             "%s 在读取期间被改写；这次摘要不属于任何单一时刻" % database,
@@ -175,6 +218,9 @@ def coverage_report_v2(database: Path, job_id: str) -> dict[str, Any]:
         "expected_content_version": (
             "present" if any(versions) else "missing"
         ),
+        "read_mode": plan.mode,
+        "read_promise": plan.promise,
+        "read_note": _read_note(read),
         "note": (
             "V2 保存了应有页集合与落盘摘要，并记录了作品页的期望内容代次；"
             "交付维度按代次比对"
@@ -204,6 +250,7 @@ def coverage_report_v2(database: Path, job_id: str) -> dict[str, Any]:
         "scope": payload["scope"],
         "coverage": payload,
         "facts_notes": notes,
+        "read": read,
         "exit_code": coverage_exit_code(payload["overall"]),
     }
 
@@ -229,9 +276,11 @@ def coverage_lines(report: Mapping[str, Any]) -> list[str]:
             else "无——保存是否齐全无法证明",
         )
     )
+    read = report.get("read") or {}
+    if read:
+        lines.append(_read_note(read))
     lines.append("退出码: %d（%s）" % (report["exit_code"], _COVERAGE_WORDS[report["exit_code"]]))
     return lines
-
 
 # --------------------------------------------------------------------------
 # filter-explain
