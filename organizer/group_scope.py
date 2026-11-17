@@ -19,6 +19,14 @@ Nothing here reads a database, the gallery or the network: a snapshot is passed
 in, and the result is data.  The scope carries a fingerprint of its member set
 per visibility, so a later snapshot can be compared with it (ensure_current),
 which is the only defence against a scope being widened behind a running task.
+
+A scope also carries the *account* its snapshot was taken from (audit RA-05).
+Dropping it let a scope derived from account B's snapshot sit under account A's
+batch: the member sets matched, the snapshot labels matched, and the report's
+account gate had nothing left to compare.  So the account is part of the scope's
+identity now, it travels through as_dict()/from_dict(), and a scope that cannot
+name its account keeps account_id "" and says so in source - it never borrows
+the caller's account, and an unknown account is never read as agreement.
 """
 from __future__ import annotations
 
@@ -82,6 +90,48 @@ def _fingerprint(sides, blocks):
             "members": [
                 {"visibility": side, "artist_ids": list(ids)} for side, ids in blocks
             ],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _account(value):
+    """The account a snapshot names, or "" when the export never recorded one.
+
+    An export written before the account was exported, or one that lost the
+    field, is not an account: "" is the honest answer and the report turns it
+    into an unknown.  A value that is present but unusable is a broken snapshot,
+    not a scope without provenance.
+    """
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise OrganizerError("snapshot_account_invalid")
+    cleaned = value.strip()
+    if not cleaned:
+        return ""
+    if len(cleaned) > 128 or any(ord(item) < 32 for item in cleaned):
+        raise OrganizerError("snapshot_account_invalid")
+    return cleaned
+
+
+def _identity_fingerprint(account_id, snapshot_id, group_pairs, members):
+    """A digest of *whose* member set this is: account, snapshot, groups, members.
+
+    It is not the member-set fingerprint.  Two accounts can hold an identically
+    named group with identical members, and the member-set digest of both is the
+    same by construction; this one differs, which is the point.  Like the other
+    digest it detects drift, it does not stop anyone from recomputing it.
+    """
+    payload = json.dumps(
+        {
+            "account_id": str(account_id or ""),
+            "snapshot_id": str(snapshot_id or ""),
+            "group_pairs": [list(pair) for pair in sorted(group_pairs)],
+            "members": sorted(str(member) for member in members),
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -276,7 +326,8 @@ class GroupScope:
     __slots__ = ("_values",)
 
     def __init__(self, *, kind, snapshot_id, group_pairs, artist_ids, sides,
-                 blocks, overlap, source, completeness, unknown_reason):
+                 blocks, overlap, source, completeness, unknown_reason,
+                 account_id=""):
         if kind not in KINDS:
             raise OrganizerError("scope_kind_invalid")
         if completeness not in COMPLETENESS:
@@ -301,9 +352,29 @@ class GroupScope:
         from_blocks = tuple(sorted({artist for _side, ids in blocks for artist in ids}))
         if tuple(sorted(members)) != from_blocks:
             raise OrganizerError("scope_members_inconsistent")
+        # The account is evidence about *whose* catalog this is.  It is a
+        # first-class field because a caller building a scope by hand would
+        # otherwise have only the free-form source bag to carry it, and a
+        # consumer that skips the bag would silently lose the gate (RA-05).
+        declared = "" if source is None else str(source.get("account_id") or "").strip()
+        account = _account(account_id) if account_id else ""
+        if not account:
+            account = _account(declared) if declared else ""
+        elif declared and declared != account:
+            # Two places name the account and they disagree: this dump does not
+            # describe one catalog, so it is not a scope.
+            raise OrganizerError("scope_account_inconsistent")
+        evidence = {str(key): value for key, value in (source or {}).items()}
+        evidence["account_id"] = account
+        evidence["account_id_state"] = "recorded" if account else "not_recorded"
+        evidence["identity_fingerprint"] = _identity_fingerprint(
+            account, snapshot_id, pairs, members
+        )
         values = {
             "kind": kind,
             "snapshot_id": str(snapshot_id),
+            "account_id": account,
+            "account_id_state": "recorded" if account else "not_recorded",
             "group_pairs": pairs,
             "groups": tuple(sorted({name for _side, name in pairs})),
             "artist_ids": members,
@@ -314,8 +385,7 @@ class GroupScope:
             "blocks": blocks,
             "overlap": MappingProxyType({str(key): tuple(value)
                                          for key, value in overlap.items()}),
-            "source": MappingProxyType({str(key): value
-                                        for key, value in source.items()}),
+            "source": MappingProxyType(evidence),
             "completeness": completeness,
             "unknown_reason": str(unknown_reason),
             "fingerprint": _fingerprint(sides, blocks),
@@ -355,6 +425,7 @@ class GroupScope:
         return {
             "kind": self.kind,
             "snapshot_id": self.snapshot_id,
+            "account_id": self.account_id,
             "groups": list(self.groups),
             "group_pairs": [list(pair) for pair in self.group_pairs],
             "artist_ids": list(self.artist_ids),
@@ -377,6 +448,10 @@ class GroupScope:
         """
         if not isinstance(value, Mapping):
             raise OrganizerError("scope_not_a_mapping")
+        # account_id is deliberately not required: a dump written before the
+        # account was exported still describes the same member set, it just
+        # cannot say whose catalog it is - and that becomes unknown, not the
+        # current account (RA-05).
         required = (
             "kind",
             "snapshot_id",
@@ -417,6 +492,7 @@ class GroupScope:
         scope = cls(
             kind=value["kind"],
             snapshot_id=value["snapshot_id"],
+            account_id=value.get("account_id") or "",
             group_pairs=pairs,
             artist_ids=tuple(str(item) for item in items_of(value["artist_ids"], "artist_ids")),
             sides=tuple(items_of(value["sides"], "sides")),
@@ -429,6 +505,12 @@ class GroupScope:
         claimed = value.get("fingerprint")
         if claimed is not None and claimed != scope.fingerprint:
             raise OrganizerError("scope_fingerprint_mismatch")
+        # The identity digest is re-derived here for the same reason: a dump
+        # whose evidence block names a different account than its members were
+        # read from is not a scope either.
+        dumped_identity = (value["source"] or {}).get("identity_fingerprint")
+        if dumped_identity is not None and dumped_identity != scope.source["identity_fingerprint"]:
+            raise OrganizerError("scope_identity_fingerprint_mismatch")
         return scope
 
     def __eq__(self, other):
@@ -512,6 +594,9 @@ def build_scope(snapshot, *, groups, kind="group_download"):
     return GroupScope(
         kind=kind,
         snapshot_id=str(snapshot.get("id") or ""),
+        # Whose catalog this member set belongs to.  Absent in an export that
+        # never recorded it: "" is unknown, never "same as the batch" (RA-05).
+        account_id=snapshot.get("account_id") or "",
         group_pairs=wanted,
         artist_ids=ordered,
         sides=sides,
@@ -543,11 +628,38 @@ def ensure_current(scope, snapshot, *, groups=None):
     started with, so a lower completeness is its own refusal
     (scope_evidence_degraded).  More evidence is not a refusal: it is returned,
     because the caller may then rely on it.
+
+    Identity comes before membership: the same member set under a different
+    account is a different catalog (scope_account_changed), and a snapshot that
+    can no longer name an account the scope did name has proven nothing about it
+    (scope_account_unproven).  Two unknown accounts are not a disagreement - they
+    are simply unproven, and the report is where that becomes a visible unknown.
+
+    A legacy scope that could not name its account, checked against a snapshot
+    that can, is accepted: the evidence only got stronger, and the returned
+    scope is the one carrying the account.  Refusing that case would make the
+    upgrade itself a reason to abandon a running task.
     """
     if not isinstance(scope, GroupScope):
         raise OrganizerError("scope_required")
     wanted = list(scope.group_pairs) if groups is None else list(groups)
     fresh = build_scope(snapshot, groups=wanted, kind=scope.kind)
+    # Identity first, members second (RA-05).  Four cases, and the difference
+    # between them is which side carries the evidence:
+    #
+    #   scope known  + fresh known, same      -> agreement, continue
+    #   scope known  + fresh known, different -> another catalog, refuse
+    #   scope unknown + fresh known           -> evidence got *stronger*; the
+    #       returned scope carries the account, so refusing here would strand
+    #       every dump written before the account was exported
+    #   scope known  + fresh unknown          -> evidence got *weaker*: a
+    #       snapshot that cannot name an account cannot re-validate a scope that
+    #       already named one, and continuing would let silence stand in for it
+    if scope.account_id and fresh.account_id:
+        if scope.account_id != fresh.account_id:
+            raise OrganizerError("scope_account_changed")
+    elif scope.account_id and not fresh.account_id:
+        raise OrganizerError("scope_account_unproven")
     if fresh.fingerprint != scope.fingerprint:
         raise OrganizerError("scope_changed")
     if _EVIDENCE_RANK[fresh.completeness] < _EVIDENCE_RANK[scope.completeness]:

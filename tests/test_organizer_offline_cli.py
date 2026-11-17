@@ -35,6 +35,10 @@ def artist(artist_id, groups, *, visibility="0", is_following=None):
 def snapshot_payload(*, complete=True, memberships=None):
     return {
         "id": "snap-1",
+        # Matches the batch these fixtures plan (account_id="a1"): the real
+        # exporter writes the account, and a scope that cannot name one is
+        # unknown, not agreed.
+        "account_id": "a1",
         "status": "complete",
         "memberships_complete": complete,
         "artists": {

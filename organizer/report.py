@@ -24,7 +24,11 @@ from organizer.group_scope import COMPLETENESS
 #: 2: scope.superset and the provenance identities were added, and covers_batch
 #:    can no longer be false in a report that exists - the combination is a
 #:    refusal now, not a field.
-REPORT_VERSION = 2
+#: 3: the scope's account is carried (scope.account_id, proof_limits.account,
+#:    proof_limits.complete, provenance.scope_account_id).  A consumer that
+#:    read 2 and ignored the account would have called an unproven report a
+#:    finished one, so the shape version moves with it (RA-05).
+REPORT_VERSION = 3
 
 #: The measurement keys a caller may supply.  A closed set: an unknown key is
 #: a typo, and reporting it as a measurement would be worse than failing.
@@ -198,6 +202,25 @@ def _planned_vs_measured(batch: Batch, measured: object) -> dict:
     }
 
 
+def _scope_account(scope: Any) -> str:
+    """The account the scope says it came from, or "" when it never said.
+
+    The field is authoritative; the source bag is the fallback for a scope built
+    by hand (or restored from a dump written before the field existed).  An
+    empty answer is unknown, and unknown is never read as "the same account as
+    the batch" - that is the gate RA-05 found open.
+    """
+    account = str(getattr(scope, "account_id", "") or "").strip()
+    if account:
+        return account
+    source = getattr(scope, "source", None)
+    if isinstance(source, Mapping):
+        declared = source.get("account_id")
+        if isinstance(declared, str) and declared.strip():
+            return declared.strip()
+    return ""
+
+
 def _inputs_agree(batch: Batch, scope: Any, rules_version: object,
                   account_id: object) -> None:
     """Refuse three inputs that describe different accounts, snapshots or rules.
@@ -220,11 +243,11 @@ def _inputs_agree(batch: Batch, scope: Any, rules_version: object,
             raise ReportError("account_invalid", account_id)
         if account_id != batch.account_id:
             raise ReportError("account_mismatch", (account_id, batch.account_id))
-    source = getattr(scope, "source", None)
-    if isinstance(source, Mapping):
-        declared = source.get("account_id")
-        if isinstance(declared, str) and declared and declared != batch.account_id:
-            raise ReportError("account_scope_mismatch", (declared, batch.account_id))
+    declared = _scope_account(scope)
+    if declared and declared != batch.account_id:
+        # A known, different account: the two inputs do not describe one
+        # catalog, whatever the snapshot labels happen to say (RA-05).
+        raise ReportError("account_scope_mismatch", (declared, batch.account_id))
 
 
 def _containment(batch: Batch, scope: Any, superset_ok: bool) -> dict:
@@ -332,6 +355,28 @@ def build_report(
 
     coverage = str(getattr(scope, "completeness"))
     covered = set(getattr(scope, "artist_ids") or ())
+    # The account is a fact about provenance, not about the member set: a scope
+    # whose members are provably whole is still a report nobody can tie to an
+    # account when the snapshot never recorded one.  That is an unknown the
+    # reader has to see, not a reason to refuse the whole report (RA-05).
+    artist_unknowns = len(unknowns)
+    scope_account = _scope_account(scope)
+    account_state = "matched" if scope_account else "unknown"
+    if account_state == "unknown":
+        # Appended after the per-artist entries so a reader that looks at [0]
+        # still finds the first artist it was asking about.
+        unknowns.append({
+            "scope": "account",
+            "state": "unknown",
+            "reason": "scope_account_unknown",
+        })
+    incomplete = []
+    if coverage != "complete":
+        incomplete.append("coverage_not_complete")
+    if account_state != "matched":
+        incomplete.append("scope_account_unknown")
+    if artist_unknowns:
+        incomplete.append("unknowns_present")
     return {
         "report_version": REPORT_VERSION,
         "batch": {
@@ -343,6 +388,8 @@ def build_report(
         },
         "scope": {
             "snapshot_id": getattr(scope, "snapshot_id", ""),
+            "account_id": scope_account,
+            "account_id_state": "recorded" if scope_account else "not_recorded",
             "group_pairs": _plain(getattr(scope, "group_pairs", ())),
             "groups": _plain(getattr(scope, "groups", ())),
             "completeness": coverage,
@@ -362,6 +409,12 @@ def build_report(
                 "" if coverage == "complete"
                 else "scope_not_complete:snapshot_cannot_prove_every_membership"
             ),
+            # "matched" means the scope named an account and the batch named the
+            # same one.  "unknown" means the scope never said: silence is not
+            # agreement, so it can never make this report complete.
+            "account": account_state,
+            "complete": not incomplete,
+            "incomplete_reasons": incomplete,
         },
         "provenance": {
             "batch_fingerprint": batch.fingerprint(),
@@ -370,6 +423,11 @@ def build_report(
                 rules_version or (batch.scope.get("rules_version") if batch.scope else "") or ""
             ),
             "scope_snapshot_id": str(getattr(scope, "snapshot_id", "") or ""),
+            "scope_account_id": scope_account,
+            "scope_account_state": "recorded" if scope_account else "not_recorded",
+            "scope_identity_fingerprint": str(
+                (getattr(scope, "source", None) or {}).get("identity_fingerprint") or ""
+            ) if isinstance(getattr(scope, "source", None), Mapping) else "",
             "scope_completeness": coverage,
             "generated_at": str(generated_at or ""),
         },

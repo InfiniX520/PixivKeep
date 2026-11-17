@@ -10,6 +10,13 @@ conclusion holds, 3 when an input cannot be read or is refused, 5 when the
 answer depends on evidence the input does not carry (a scope whose membership
 is only partially known, a report whose coverage cannot be claimed).  A number
 that was not measured is printed as 未知 - never as 0.
+
+Account identity is one of those facts (audit RA-05).  A scope names the account
+its snapshot came from, so a scope taken from another account's snapshot is
+refused by *both* commands, and a scope that cannot name its account is printed
+as 未记录 and exits 5 - silence is not agreement.  --account only checks the
+calling context against the batch; it says nothing about where the scope came
+from, and it can never turn an unknown scope account into a known one.
 """
 from __future__ import annotations
 
@@ -156,23 +163,28 @@ def cmd_scope_plan(args):
     data = _json_safe(scope.as_dict())
     members = len(scope.artist_ids)
     completeness = scope.completeness
-    if completeness == "complete":
-        lines = [
-            "组: %s" % (", ".join(scope.groups),),
-            "画师: %d 位" % members,
-            "完整性: 完整",
-            "指纹: %s" % (scope.fingerprint,),
-        ]
-        return {"command": "scope-plan", "scope": data}, lines, EXIT_OK
+    account = scope.account_id
+    complete = completeness == "complete"
     lines = [
         "组: %s" % (", ".join(scope.groups),),
         "画师: %d 位" % members,
-        "完整性: %s" % ("部分" if completeness == "partial" else "未知"),
-        "原因: %s" % (scope.unknown_reason or "snapshot_incomplete",),
+        # Whose catalog this is, in plain words: a scope without it can never be
+        # reported as an account-checked result.
+        "账号: %s" % (account or "未记录",),
+        "完整性: %s" % ("完整" if complete else ("部分" if completeness == "partial" else "未知"),),
         "指纹: %s" % (scope.fingerprint,),
-        "注意: 这份范围不能当作该组的全集",
     ]
-    return {"command": "scope-plan", "scope": data}, lines, EXIT_UNPROVEN
+    if not complete:
+        lines.append("原因: %s" % (scope.unknown_reason or "snapshot_incomplete",))
+        lines.append("注意: 这份范围不能当作该组的全集")
+    if not account:
+        lines.append("注意: 快照没有记录账号，这份范围无法核对账号来源")
+    unproven = not complete or not account
+    return (
+        {"command": "scope-plan", "scope": data},
+        lines,
+        EXIT_UNPROVEN if unproven else EXIT_OK,
+    )
 
 
 def _report_engine():
@@ -249,7 +261,14 @@ def cmd_batch_report(args):
         # report must still not be called usable by this command.
         raise OfflineRefusal("report_scope_inconsistent", "covers_batch=false")
     lines = _report_lines(data)
-    unproven = scope.completeness != "complete" or bool(data.get("unknowns"))
+    limits = data.get("proof_limits") or {}
+    unproven = (
+        scope.completeness != "complete"
+        or bool(data.get("unknowns"))
+        # An account the scope cannot name is evidence the input does not carry,
+        # which is exactly what exit 5 is for (RA-05).
+        or limits.get("account") != "matched"
+    )
     payload = {
         "command": "batch-report",
         "report": data,
@@ -281,11 +300,23 @@ def _report_lines(data):
         lines.append("状态计数: %s" % (" ".join(parts),))
     else:
         lines.append("状态计数: 未知（报告未提供）")
+    limits = data.get("proof_limits") if isinstance(data.get("proof_limits"), dict) else {}
+    scope = data.get("scope") if isinstance(data.get("scope"), dict) else {}
+    if limits.get("account") == "matched":
+        lines.append("范围账号: %s（与批次一致）" % (scope.get("account_id") or "",))
+    else:
+        lines.append("范围账号: 未记录（无法核对账号来源）")
     unknowns = data.get("unknowns")
     if unknowns:
         lines.append("待人工确认: %d 项" % (len(unknowns),))
         for item in list(unknowns)[:10]:
-            if isinstance(item, dict):
+            if isinstance(item, dict) and item.get("scope"):
+                # A scope-level unknown is not an artist: name the scope field
+                # so nobody goes looking for an artist with an empty id.
+                lines.append(
+                    "  - 范围%s: %s" % (item.get("scope"), item.get("reason") or "")
+                )
+            elif isinstance(item, dict):
                 lines.append(
                     "  - %s %s"
                     % (item.get("artist_id", "?"), item.get("reason") or item.get("kind") or "")
@@ -341,7 +372,12 @@ def register(commands):
         "--rules-version", default=None, help="当前规则版本；与批次记录不一致时拒绝"
     )
     batch_report.add_argument(
-        "--account", default=None, help="当前账号；与批次记录不一致时拒绝"
+        "--account",
+        default=None,
+        help=(
+            "当前调用上下文里的账号；只与批次记录核对，"
+            "不能证明范围（scope）来自哪个账号，也不会把未知的范围账号变成已知"
+        ),
     )
     for parser in (batch_plan, scope_plan, batch_report):
         parser.add_argument("--json", action="store_true", help="输出 JSON 而不是文本")
