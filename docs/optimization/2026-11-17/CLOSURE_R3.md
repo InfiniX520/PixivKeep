@@ -58,7 +58,8 @@
 - 已证明：三种旁车在连接前被拒（拒绝时对 staging 路径的 SQLite 连接数为 0）、哨兵字节/时间/硬链接不变；
   外来名阻止发布且原样保留；成品被抢占时 `backup_target_exists` 且对方目录逐文件 sha256 不变；
   干净失败不留空壳；成功发布后 backups 根无 `.staging-*`；发布后目录仍可读写；`backup→verify` ok；
-  `file_group` 同样预检。新增 13 条 + 回归 262 项（1 skip 为既有平台用例）。
+  `file_group` 同样预检。新增 13 条用例；合流后我重跑备份相关 11 个模块 239 项（1 skip 为既有平台用例），
+  lane 自报的更大扫描（13 模块 262 项）作为参考列在它的报告里。
 - 仍未知（比初稿写得更重）：预检→connect 之间若同用户进程监视私有目录并注入文件，Windows 上没有"拒绝创建子项"的锁。
   发布闸门只能看见**仍然存在**的外来名字；若 SQLite 在打开/关闭时把注入的 `-journal`/`-wal` 删掉（R2 审计实测过这个行为），
   闸门就无可拒、也无从知道它来过。所以这一窗口的正确说法是"**无法证明与无法阻止**"，不是"能被事后拒绝"。
@@ -165,7 +166,8 @@ Tk 四模块                 118 tests / 118 passed / 0 failed / 0 errors / 0 sk
 跳过的 5 项与上一轮同一批：3 条真实符号链接（平台不支持重解析点）、`test_pa03_missing_path_identity_cannot_be_reported_proven`（归档收集器不在公开仓库内）、
 `test_u1a_j01_health::test_w_phase_local_boundaries_are_not_wired_into_reuse_yet`（上一轮登记的未接线条目）。
 
-合流过程中的分组证据（每包合流后立即重跑，XML 保留在 `verify/`）：
+合流过程中的分组证据（每包合流后立即重跑，XML 保留在 `verify/`）。注意：这些是我自己跑的分组计数；
+各节「已证明」里出现的更大模块计数（如 262、370、388）是各 lane 自报的定向扫描数，我没有逐个重跑，以它们的报告为准。
 
 ```
 A 备份族与回归        239 tests / 238 passed / 1 skipped        mergeA_backup.xml  298584419AEDEF19
