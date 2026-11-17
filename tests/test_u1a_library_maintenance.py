@@ -555,20 +555,31 @@ def test_a_file_group_backup_refuses_a_source_that_moves_during_the_copy(tmp_pat
     assert info.value.code == "backup_verification_failed", info.value.detail
     assert "library_changed_during_copy" in info.value.detail
     target = tmp_path / "backups" / "moving"
-    # A failed backup must not look like a finished one: no manifest.
+    # A failed backup must not look like a finished one: no manifest, and no
+    # final directory at all.  Since the staging contract the final name only
+    # comes into being through one atomic directory rename, and a failed run
+    # never reaches it, so the artifact cannot be mistaken for a backup and no
+    # half-written file ever appears under the name a reader will use.
+    assert not target.exists()
     assert not (target / m.MANIFEST_NAME).exists()
     # Whatever is left stays *only* because it cannot be proven this run's.
     # SQLite creates -wal/-shm beside the copy when the copy is inspected, and a
     # name plus a suffix is not a provenance, so the cleanup keeps them and the
-    # error detail names the directory instead of deleting a possible stranger.
-    # Two outcomes are allowed, and both must be *stated*: either nothing was
-    # kept, or the directory is still there and the error names it.  Leaving
-    # this behind an "if it happens to exist" would let a silent keep pass as
-    # a delete, which is exactly the claim this test has to pin.
-    if target.exists():
-        assert str(target) in info.value.detail, info.value.detail
-        assert "kept=" in info.value.detail, info.value.detail
-        assert {item.name for item in target.iterdir()} <= {
+    # error detail names the private staging directory instead of deleting a
+    # possible stranger.  Two outcomes are allowed, and both must be *stated*:
+    # either nothing was kept, or the staging directory is still there and the
+    # error names it.  Leaving this behind an "if it happens to exist" would let
+    # a silent keep pass as a delete, which is exactly the claim this test has
+    # to pin.
+    staging = [
+        path
+        for path in (tmp_path / "backups").iterdir()
+        if path.name.startswith(m._STAGING_PREFIX)
+    ]
+    if "kept=" in info.value.detail:
+        assert len(staging) == 1, info.value.detail
+        assert str(staging[0]) in info.value.detail, info.value.detail
+        assert {item.name for item in staging[0].iterdir()} <= {
             "library.sqlite3",
             "library.sqlite3-wal",
             "library.sqlite3-shm",
@@ -576,7 +587,7 @@ def test_a_file_group_backup_refuses_a_source_that_moves_during_the_copy(tmp_pat
     else:
         # Nothing left behind has to be said out loud too, so that "deleted"
         # can never be the silent default of a cleanup that did not run.
-        assert "kept=" not in info.value.detail or target.exists()
+        assert staging == [], info.value.detail
 
 
 def test_a_backup_of_an_unhealthy_but_readable_library_is_faithful(tmp_path):
