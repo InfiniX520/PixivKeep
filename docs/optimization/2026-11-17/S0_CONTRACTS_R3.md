@@ -202,3 +202,29 @@ classify(evidence, ruleset, *, visual=None)  # 内部核对 visual.rules_version
 ## 9. 本轮不做
 
 真实账号写回、图库恢复/释放、云盘往返、安装解码器、V2 增加期望内容代次（独立数据面工作）、把 observed 摘要当 expected、任何形式的“通过/完成/保证”而没有同提交证据。
+
+## 10. 契约修订记录
+
+### 10.1 RA-04 的两条反例互斥（2026-11-17，lane E 开工时发现，lead 裁决）
+
+- 反例 #1 `test_ra04_visual_receipt_cannot_be_reused_under_new_rule_version` 第 62 行断言
+  `review_evidence(Store({'s1':sample}), receipt, ...)` 返回 sufficient，而该 store 里**没有任何 review 记录**；
+- 反例 #2 `test_ra04_visual_adapter_requires_a_stored_review_not_a_retyped_mapping` 对同样的输入
+  （只有 sample、review 表为空）断言 `not visual.sufficient`。
+
+两条在本轮 §5 下不可能同时绿。裁决：**按 §5 实施**，#2 转绿，#1 停在第一个断言（第 62 行）；
+#1 的真正目标（v1 证据交给 v2 规则集不得 high）由新增用例以「有 canonical review」为前提完整覆盖，
+另加「版本标签相同但规则内容不同（指纹不同）」一例。
+
+CLOSURE_R3 必须写明这一点，并把 #1 记为「断言了门禁之前行为的过期反例」——不得记为已修、已通过，
+也不得为了让 #1 绿而退回「store 读不到 review 就相信传入字典」。
+
+### 10.2 §3 选择表按实测改写（2026-11-17，lane C 的 probe_read_modes）
+
+契约初稿写了两处未经实测的推断，lane C 的真 SQLite 探针把它们推翻了，按实测改写：
+
+1. 「WAL、两者都不在（已 checkpoint）→ `ro` 零副作用」**不成立**：实测直接 `ro` 会新建 `-wal`(0 B) 与 `-shm`(32 KiB)。改为私有副本。
+2. 「WAL、`-wal` 在、`-shm` 不在 → 严格拒绝，仅显式 opt-in 才复制」改为**默认复制**，理由同上并见 §3 新增条目。
+3. `ReadPlan` 增补 `sql_mode`、`promise`、`copy.source_members`、`evidence.changed`；`strict_no_side_effects` 只在 `names_and_bytes` 与 `copy_verified` 时为 true——活 WAL 的 `-shm` 锁字节会变，只能承诺 `names_only`。
+4. 允许修改 `tests/test_v2_coverage_facts.py` 里两条编码旧语义的断言（`test_the_read_only_mode_follows_the_evidence_on_disk`、`test_a_file_that_changes_between_the_two_stamps_is_refused`），但必须换成更强的断言：活写者 → `ro`、无旁车 → `copy`、`immutable` 只能由调用方显式声明；`database_changed_during_read` 只属于显式 `caller_owned_snapshot` 的 immutable 读，并新增一条对照证明锁定读期间写者并发提交**不**被报这个错。其余断言一条不动。
+
