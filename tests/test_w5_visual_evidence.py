@@ -21,22 +21,41 @@ from organizer.rules import (
     VisualEvidence,
     classify,
     review_evidence,
+    ruleset_fingerprint,
 )
 
 
 class Store:
-    """The only read review_evidence() may make: one stored sample."""
+    """The only reads review_evidence() may make: one sample, one review.
 
-    def __init__(self, samples):
+    A whitelist double, not a database: any *other* read is a bug in the module
+    under test, so it stays an AssertionError.  Reviews are placed in it the way
+    samples.review() places them in the real store, which is what makes "the
+    receipt was never stored" a fact this file can state at all (RA-04): a dict
+    that nobody stored cannot be proved by retyping it.
+    """
+
+    def __init__(self, samples, reviews=None):
         self.samples = dict(samples)
+        self.reviews = dict(reviews or {})
 
     def get(self, kind, document_id):
-        if kind != "sample":
-            raise AssertionError("review_evidence read %r, not a sample" % (kind,))
-        try:
-            return self.samples[document_id]
-        except KeyError:
-            raise KeyError(document_id) from None
+        if kind == "sample":
+            try:
+                return self.samples[document_id]
+            except KeyError:
+                raise KeyError(document_id) from None
+        if kind == "review":
+            try:
+                return self.reviews[document_id]
+            except KeyError:
+                raise KeyError(document_id) from None
+        raise AssertionError("review_evidence read %r, not a sample or review" % (kind,))
+
+    def store_review(self, review):
+        """Put one review where samples.review() would have put it."""
+        self.reviews[review["id"]] = review
+        return review
 
 
 def sha(text):
@@ -75,9 +94,15 @@ def make_sample(*, works=12, available="same", pages_per_work=1, sample_id="s1")
 
 
 def make_receipt(sample, keys=None, *, needs_more=False, attestation=REVIEW_ATTESTATION,
-                 rules_version="v1", account="acct-1", artist="7", snapshot=None,
-                 tamper_sha=False, tamper_illust=False):
-    """A receipt shaped like samples.review() writes it."""
+                 rules_version="v1", rules_fingerprint="", account="acct-1", artist="7",
+                 snapshot=None, tamper_sha=False, tamper_illust=False, store=None):
+    """A receipt shaped like samples.review() writes it.
+
+    With store= the receipt is also *stored*, which is what makes it evidence at
+    all: review_evidence() reads the canonical review under this id and refuses a
+    copy that was never saved.  Without store= the dict is only a claim, and the
+    caller is testing exactly that.
+    """
     chosen = list(sample["images"]) if keys is None else list(keys)
     evidence = []
     for key in chosen:
@@ -87,7 +112,7 @@ def make_receipt(sample, keys=None, *, needs_more=False, attestation=REVIEW_ATTE
         if tamper_illust:
             saved["illust_id"] = "9999"
         evidence.append(saved)
-    return {
+    receipt = {
         "id": "r1",
         "created_at": "2026-11-15T00:00:00Z",
         "account_id": account,
@@ -99,15 +124,19 @@ def make_receipt(sample, keys=None, *, needs_more=False, attestation=REVIEW_ATTE
         "observer": "synthetic",
         "rationale": "",
         "rules_version": rules_version,
+        "rules_fingerprint": rules_fingerprint,
         "coverage_note": "",
         "proposed_groups": [],
         "needs_more": needs_more,
         "attestation": attestation,
     }
+    if store is not None:
+        store.store_review(receipt)
+    return receipt
 
 
-def ruleset():
-    return RuleSet("1", (Rule("r-cat", "topic", "cat", ("cats",), weight=2),))
+def ruleset(version="1"):
+    return RuleSet(version, (Rule("r-cat", "topic", "cat", ("cats",), weight=2),))
 
 
 # -- the frozen counterexample, restated here so this file stands alone --------
@@ -165,12 +194,17 @@ def test_review_evidence_refuses_something_that_is_not_a_receipt():
 def test_a_full_receipt_is_sufficient_and_lifts_the_classification():
     sample = make_sample(works=12)
     store = Store({"s1": sample})
-    fact = review_evidence(store, make_receipt(sample))
+    rules = ruleset(version="v1")
+    receipt = make_receipt(sample, store=store, rules_version=rules.version,
+                           rules_fingerprint=ruleset_fingerprint(rules))
+    fact = review_evidence(store, receipt)
     assert fact.state == "sufficient"
     assert fact.distinct_works == 12
     assert fact.required_works == 12
     assert fact.available_works == 12
-    result = classify({"tags": ["cat"]}, ruleset(), visual=fact)
+    assert fact.review_id == "r1"
+    assert fact.rules_fingerprint == ruleset_fingerprint(rules)
+    result = classify({"tags": ["cat"]}, rules, visual=fact)
     assert result["confidence"] == "high"
     assert result["needs_more"] is False
     assert result["reasons"] == []
@@ -179,7 +213,7 @@ def test_a_full_receipt_is_sufficient_and_lifts_the_classification():
 def test_pages_of_one_work_count_once():
     sample = make_sample(works=3, available=12, pages_per_work=4)
     store = Store({"s1": sample})
-    fact = review_evidence(store, make_receipt(sample))
+    fact = review_evidence(store, make_receipt(sample, store=store))
     assert len(sample["images"]) == 12
     assert fact.distinct_works == 3
     assert fact.state == "insufficient"
@@ -191,7 +225,7 @@ def test_eleven_of_twelve_distinct_works_is_insufficient():
     sample = make_sample(works=12)
     store = Store({"s1": sample})
     keys = list(sample["images"])[:11]
-    fact = review_evidence(store, make_receipt(sample, keys))
+    fact = review_evidence(store, make_receipt(sample, keys, store=store))
     assert fact.state == "insufficient"
     assert (fact.distinct_works, fact.required_works) == (11, 12)
 
@@ -201,16 +235,19 @@ def test_a_confirmed_three_work_artist_is_judged_against_its_own_inventory():
     # available_works is the stored inventory, not something the caller types.
     sample = make_sample(works=3)
     store = Store({"s1": sample})
-    fact = review_evidence(store, make_receipt(sample))
+    rules = ruleset(version="v1")
+    receipt = make_receipt(sample, store=store, rules_version=rules.version,
+                           rules_fingerprint=ruleset_fingerprint(rules))
+    fact = review_evidence(store, receipt)
     assert (fact.distinct_works, fact.required_works, fact.available_works) == (3, 3, 3)
     assert fact.state == "sufficient"
-    assert classify({"tags": ["cat"]}, ruleset(), visual=fact)["confidence"] == "high"
+    assert classify({"tags": ["cat"]}, rules, visual=fact)["confidence"] == "high"
 
 
 def test_an_unknown_inventory_is_unknown_not_a_lowered_bar():
     sample = make_sample(works=3, available=None)
     store = Store({"s1": sample})
-    fact = review_evidence(store, make_receipt(sample))
+    fact = review_evidence(store, make_receipt(sample, store=store))
     assert fact.state == "unknown"
     assert fact.detail == "available_works_unknown"
     assert fact.required_works is None
@@ -222,7 +259,7 @@ def test_an_unknown_inventory_is_unknown_not_a_lowered_bar():
 def test_an_artist_with_no_works_cannot_be_certified():
     sample = make_sample(works=0, available=0)
     store = Store({"s1": sample})
-    fact = review_evidence(store, make_receipt(sample))
+    fact = review_evidence(store, make_receipt(sample, store=store))
     assert fact.state in ("unknown", "insufficient")
     assert fact.detail in ("viewed_works_missing", "available_works_empty")
     assert classify({"tags": ["cat"]}, ruleset(), visual=fact)["confidence"] != "high"
@@ -231,7 +268,7 @@ def test_an_artist_with_no_works_cannot_be_certified():
 def test_a_receipt_for_other_bytes_proves_nothing():
     sample = make_sample(works=12)
     store = Store({"s1": sample})
-    fact = review_evidence(store, make_receipt(sample, tamper_sha=True))
+    fact = review_evidence(store, make_receipt(sample, tamper_sha=True, store=store))
     assert fact.state == "unknown"
     assert fact.detail == "view_evidence_mismatch"
 
@@ -239,7 +276,7 @@ def test_a_receipt_for_other_bytes_proves_nothing():
 def test_a_receipt_for_another_work_id_proves_nothing():
     sample = make_sample(works=12)
     store = Store({"s1": sample})
-    fact = review_evidence(store, make_receipt(sample, tamper_illust=True))
+    fact = review_evidence(store, make_receipt(sample, tamper_illust=True, store=store))
     assert fact.state == "unknown"
     assert fact.detail == "view_evidence_mismatch"
 
@@ -247,7 +284,7 @@ def test_a_receipt_for_another_work_id_proves_nothing():
 def test_a_receipt_without_the_attestation_proves_nothing():
     sample = make_sample(works=12)
     store = Store({"s1": sample})
-    fact = review_evidence(store, make_receipt(sample, attestation=""))
+    fact = review_evidence(store, make_receipt(sample, attestation="", store=store))
     assert fact.state == "unknown"
     assert fact.detail == "view_attestation_missing"
 
@@ -255,7 +292,7 @@ def test_a_receipt_without_the_attestation_proves_nothing():
 def test_a_receipt_from_another_artist_is_refused():
     sample = make_sample(works=12)
     store = Store({"s1": sample})
-    fact = review_evidence(store, make_receipt(sample, artist="8"))
+    fact = review_evidence(store, make_receipt(sample, artist="8", store=store))
     assert fact.state == "unknown"
     assert fact.detail == "receipt_sample_mismatch"
 
@@ -263,7 +300,7 @@ def test_a_receipt_from_another_artist_is_refused():
 def test_a_receipt_the_store_never_saw_is_unknown():
     sample = make_sample(works=12)
     store = Store({})
-    fact = review_evidence(store, make_receipt(sample))
+    fact = review_evidence(store, make_receipt(sample, store=store))
     assert fact.state == "unknown"
     assert fact.detail == "sample_unknown"
 
@@ -271,7 +308,7 @@ def test_a_receipt_the_store_never_saw_is_unknown():
 def test_a_receipt_that_itself_asked_for_more_cannot_certify():
     sample = make_sample(works=12)
     store = Store({"s1": sample})
-    fact = review_evidence(store, make_receipt(sample, needs_more=True))
+    fact = review_evidence(store, make_receipt(sample, needs_more=True, store=store))
     assert fact.state == "insufficient"
     assert fact.detail == "receipt_asked_for_more"
 
@@ -280,7 +317,7 @@ def test_a_stale_rules_version_makes_the_receipt_stale():
     sample = make_sample(works=12)
     store = Store({"s1": sample})
     fact = review_evidence(
-        store, make_receipt(sample, rules_version="v1"), current_rules_version="v2"
+        store, make_receipt(sample, rules_version="v1", store=store), current_rules_version="v2"
     )
     assert fact.state == "stale"
     assert fact.detail == "stale_receipt"
@@ -292,7 +329,7 @@ def test_a_stale_rules_version_makes_the_receipt_stale():
 def test_a_receipt_from_another_snapshot_is_stale():
     sample = make_sample(works=12)
     store = Store({"s1": sample})
-    fact = review_evidence(store, make_receipt(sample), current_snapshot_id="snap-2")
+    fact = review_evidence(store, make_receipt(sample, store=store), current_snapshot_id="snap-2")
     assert fact.state == "stale"
     assert fact.detail == "stale_snapshot"
 
@@ -300,7 +337,7 @@ def test_a_receipt_from_another_snapshot_is_stale():
 def test_the_same_receipt_read_twice_gives_the_same_fact():
     sample = make_sample(works=12)
     store = Store({"s1": sample})
-    receipt = make_receipt(sample)
+    receipt = make_receipt(sample, store=store)
     assert review_evidence(store, receipt) == review_evidence(store, receipt)
     assert review_evidence(store, receipt).as_dict()["receipt_id"] == "r1"
 
