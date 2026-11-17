@@ -18,6 +18,13 @@ Three rules decide the shape of this module:
   mtime before and after, hashes both ends when the budget allows, and says
   "changed" or "unknown" instead of handing back a verdict about bytes that are
   no longer at that path;
+* the decoder's verdict is bound to the bytes it actually decoded.  Reading the
+  path once for a hash and again for the decode proves only that two separate
+  observations agreed, which is exactly the window an A->B->A swap lives in.
+  The decode now reads through a pass that hashes every byte the decoder takes
+  and that then takes the rest of the file itself, so the receipt names one
+  content version: the content object reports it, and a decode whose bytes
+  cannot be tied to that version is "undecided", never "ok";
 * transport only says length_matched after comparing the expected length with
   the length actually observed.  A caller-supplied number is a claim to be
   checked, not evidence.
@@ -118,8 +125,16 @@ def _structure(target: Path, *, expected_size, expected_media_type, stop_event,
 
 
 def _decode(target: Path, media_type: str | None, structure_state: str, *,
-            policy: str, limits: DecodeLimits, stop) -> tuple[Dimension, DecodeReceipt | None]:
-    """The decode question, answered honestly even when nothing can answer it."""
+            policy: str, limits: DecodeLimits, stop,
+            stream=None) -> tuple[Dimension, DecodeReceipt | None]:
+    """The decode question, answered honestly even when nothing can answer it.
+
+    stream is the content pass the bytes are taken through (see _ContentPass).
+    Opening the path here instead would let a swap between the version hash and
+    this call decide what gets decoded; the pass names the bytes, so the receipt
+    can be tied to a version.  None keeps the path-opening behaviour for a
+    caller that only wants the decoder's own verdict.
+    """
     if policy == "structure":
         return Dimension("undecided", "not_requested"), None
     if structure_state != "ok":
@@ -129,7 +144,14 @@ def _decode(target: Path, media_type: str | None, structure_state: str, *,
     if media_type == "image/png":
         started = time.perf_counter()
         try:
-            with target.open("rb") as stream:
+            if stream is None:
+                with target.open("rb") as handle:
+                    result = decode_png(handle, limits=limits, stop=stop)
+            else:
+                # The pass is a read-only view from the first byte; a decoder
+                # that read from wherever the descriptor happened to be would
+                # decode a tail as if it were the header.
+                stream.seek(0)
                 result = decode_png(stream, limits=limits, stop=stop)
         except OSError as error:
             # The file moved between the structure question and this open: an
@@ -202,6 +224,21 @@ def _pages(evidence, decode_state: str) -> Dimension:
     return Dimension("unknown", "decoder_did_not_read_frames")
 
 
+def _pages_after(structure_state: str, decode_state: str) -> Dimension:
+    """The pages dimension for a decode whose verdict was replaced later.
+
+    _pages() answers the same question while the evidence is in hand; the
+    reconciliation in check_file() runs after that, so it asks again from the
+    two states it still has.  Counting frames needs a decode: a demoted decode
+    cannot prove the pages were read.
+    """
+    if structure_state != "ok":
+        return Dimension("unknown", "structure_not_ok")
+    if decode_state == "ok":
+        return Dimension("all_frames")
+    return Dimension("unknown", "decoder_did_not_read_frames")
+
+
 def _transport(expected_size, observed_size, observe_error) -> Dimension:
     """Length evidence: a comparison, never a restatement of the expectation.
 
@@ -260,6 +297,10 @@ def _refused_report(target: Path, reason: str, *, decode_policy: str,
         "quality": quality.as_dict(),
         "receipt": None,
         "budget": command.snapshot(),
+        # Nothing was read, so there is no content to name.  The reason is the
+        # one that stopped the check, not a verdict about the file.
+        "content": {"state": "unknown", "sha256": None, "bytes": None,
+                    "complete": False, "source": "file_stream", "reason": reason},
         "content_version": {"state": "unknown", "reason": reason},
     }
 
@@ -323,6 +364,9 @@ def quality_evidence(path, *, decode_policy: str = "structure", limits=None, sto
     )
 
     granted = command.grant() if structure.state == "ok" else None
+    # The pass the decode read through, when one was opened.  None means no
+    # bytes were read for the decode, so no content version can be named.
+    passed = None
     if decode_policy == "structure":
         decode, receipt = Dimension("undecided", "not_requested"), None
     elif structure.state != "ok":
@@ -334,14 +378,46 @@ def quality_evidence(path, *, decode_policy: str = "structure", limits=None, sto
         if refused:
             decode, receipt = Dimension("undecided", refused), None
         else:
-            decode, receipt = _decode(
-                target,
-                getattr(evidence, "media_type", None),
-                structure.state,
-                policy=decode_policy,
-                limits=granted,
-                stop=stop,
-            )
+            # The decode reads through a pass that hashes what it takes, so the
+            # receipt can name the bytes it judged.  A file that vanished before
+            # this open is left to _decode's own open, which reports it as an
+            # unreadable artifact instead of a crash (there is no content to
+            # name either way).
+            handle = None
+            try:
+                handle = target.open("rb")
+            except OSError:
+                handle = None
+            if handle is not None:
+                passed = _ContentPass(handle)
+            try:
+                decode, receipt = _decode(
+                    target,
+                    getattr(evidence, "media_type", None),
+                    structure.state,
+                    policy=decode_policy,
+                    limits=granted,
+                    stop=stop,
+                    stream=passed,
+                )
+                if passed is not None:
+                    if decode.state == "ok" and passed.reads == 0:
+                        # The decoder answered without reading through the pass
+                        # (a decoder that opens the path itself), so its verdict
+                        # cannot be tied to any bytes this check hashed.
+                        passed.reason = "decode_stream_not_observed"
+                    elif decode.state == "ok":
+                        # A decoder may stop at the end of the image data while
+                        # the file continues (trailing bytes): the rest is part
+                        # of the version and is taken through the file budget.
+                        passed.finish(command)
+                    elif decode.state == "failed":
+                        passed.reason = "decode_failed"
+                    else:
+                        passed.reason = str(decode.reason or "decode_undecided")
+            finally:
+                if handle is not None:
+                    handle.close()
             if receipt is not None:
                 spent = _receipt_bytes(receipt)
                 if spent is None:
@@ -376,6 +452,10 @@ def quality_evidence(path, *, decode_policy: str = "structure", limits=None, sto
         "quality": quality.as_dict(),
         "receipt": None if receipt is None else receipt.as_dict(),
         "budget": command.snapshot(),
+        # The bytes this check read, from the pass that read them.  The
+        # version hashes are reconciled against it in check_file(); on its own
+        # this says which content the dimensions above describe.
+        "content": _content_facts(passed, getattr(evidence, "sha256", None), size),
         "content_version": (
             {"state": "observed", "sha256": getattr(evidence, "sha256", None),
              "size": size}
@@ -401,6 +481,135 @@ def _receipt_bytes(receipt: DecodeReceipt) -> int | None:
 #: hashing is noticed within one chunk, large enough that the per-chunk overhead
 #: stays invisible next to the hashing itself.
 _HASH_CHUNK = 256 * 1024
+
+#: What a content observation may say about the bytes a check certified.
+#:
+#:   observed  one pass reached the end of the file and every digest taken in
+#:             this run agrees, so the verdict names one content version
+#:   unknown   something ended the pass early (a spent ceiling, a cancel, a
+#:             decoder that read through its own path): nothing is claimed
+#:   mismatch  two full passes saw different bytes, so no single version exists
+CONTENT_STATES = ("observed", "unknown", "mismatch")
+
+
+class _ContentPass:
+    """The bytes one decode really consumed, hashed as they are read.
+
+    A decoder given a bare path opens whatever that name points at *when it
+    starts*; a first hash taken before and a second one after can both see an
+    unchanged file while the decode in between read something else (A->B->A with
+    the same size and restored mtime).  Handing the decoder this object removes
+    that window from the receipt: every read it makes is hashed and counted as
+    it goes, so the digest describes the bytes it decoded.
+
+    Nothing is charged twice.  The decoder's own Budget already clamps and
+    charges its reads (see core.png_decode._Source); finish() takes whatever the
+    decoder left unread through the file budget, which is also where a cancel or
+    a spent ceiling ends the pass with a reason instead of a digest.  A prefix is
+    never returned as a content version: digest is None unless the pass reached
+    the end of the file.
+    """
+
+    __slots__ = ("_stream", "_hasher", "bytes", "reason", "complete", "reads")
+
+    def __init__(self, stream) -> None:
+        self._stream = stream
+        self._hasher = hashlib.sha256()
+        #: Bytes the decoder took through this pass.
+        self.bytes = 0
+        #: Why the pass stopped short, or "" when it reached the end.
+        self.reason = ""
+        #: True only when the last byte of the file has been hashed.
+        self.complete = False
+        #: How many read() calls the decoder made; 0 means it never used it.
+        self.reads = 0
+
+    @property
+    def digest(self) -> str | None:
+        """The digest of the whole file, or None while the pass is short."""
+        return self._hasher.hexdigest() if self.complete else None
+
+    def read(self, amount=-1):
+        data = self._stream.read(amount)
+        if data:
+            self.bytes += len(data)
+            self.reads += 1
+            self._hasher.update(data)
+        return data
+
+    # A decoder that asks for the descriptor (png_decode only reads, but the
+    # structure walk and tests ask for fileno) keeps working through this.
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+    def _at_end(self) -> bool:
+        """True when the file has no bytes beyond the ones already hashed."""
+        try:
+            return self.bytes >= int(os.fstat(self._stream.fileno()).st_size)
+        except OSError:
+            return False
+
+    def finish(self, command: "CommandBudget") -> None:
+        """Hash whatever the decoder did not read, charging the file budget."""
+        if self.complete:
+            return
+        if self._at_end():
+            self.complete = True
+            return
+        meter = command.meter()
+        while True:
+            reason = meter.poll()
+            if reason is not None:
+                self.reason = reason
+                return
+            allowed = meter.size(_HASH_CHUNK)
+            if allowed <= 0:
+                # A file that ends exactly at the ceiling is not a truncation:
+                # asking once more is how the pass learns it is at the end.
+                if self._at_end():
+                    self.complete = True
+                    return
+                self.reason = "bytes_limit"
+                return
+            chunk = self._stream.read(allowed)
+            if not chunk:
+                self.complete = True
+                return
+            self.bytes += len(chunk)
+            self.reads += 1
+            self._hasher.update(chunk)
+            reason = meter.spent(len(chunk))
+            if reason is not None:
+                self.reason = reason
+                return
+
+
+def _content_facts(passed: "_ContentPass | None", structure_digest: str | None,
+                   size: int | None) -> dict:
+    """The content object: what bytes this check certified, or why it cannot.
+
+    The digest is taken from the pass that read the file, never from the
+    metadata: size and mtime are not a content version.  When no decode ran, the
+    structure walk's digest is used - it read the whole file too - and when
+    nothing read the file at all the state is unknown with the reason.
+    """
+    if passed is None:
+        if structure_digest and size is not None:
+            return {"state": "observed", "sha256": structure_digest, "bytes": size,
+                    "complete": True, "source": "file_stream", "reason": ""}
+        return {"state": "unknown", "sha256": None, "bytes": None, "complete": False,
+                "source": "file_stream", "reason": "structure_not_observed"}
+    if passed.complete and passed.digest is not None:
+        if structure_digest is not None and structure_digest != passed.digest:
+            # Two full passes read different bytes: there is no single content
+            # version this check could name.
+            return {"state": "mismatch", "sha256": passed.digest, "bytes": passed.bytes,
+                    "complete": True, "source": "file_stream",
+                    "reason": "content_changed"}
+        return {"state": "observed", "sha256": passed.digest, "bytes": passed.bytes,
+                "complete": True, "source": "file_stream", "reason": ""}
+    return {"state": "unknown", "sha256": None, "bytes": passed.bytes, "complete": False,
+            "source": "file_stream", "reason": passed.reason or "partial_read"}
 
 
 def _reached_end(stream, hashed: int) -> bool:
@@ -523,6 +732,39 @@ def check_file(path, *, decode_policy: str = "structure", limits=None, stop=None
         before, after, sha_before, sha_after,
         hash_before_reason or hash_after_reason,
     )
+
+    # The content object and the version hashes answer one question from two
+    # directions.  Two full-file digests that disagree mean no single version
+    # was certified, so a decode "ok" cannot describe the file at this path:
+    # that is the A->B->A window the old two-hash scheme could not see, because
+    # both of its hashes could observe the same restored bytes while the decode
+    # in between read something else.
+    content = dict(report.get("content") or {})
+    digests = {value for value in (content.get("sha256"), sha_before, sha_after) if value}
+    if content.get("state") == "observed" and len(digests) > 1:
+        content["state"] = "mismatch"
+        content["reason"] = "content_changed"
+    report["content"] = content
+    report["content_bound"] = content.get("state") == "observed"
+    decode = report["quality"]["decode"]
+    if decode["state"] == "ok":
+        if content.get("state") == "mismatch":
+            reason = "content_changed"
+        elif content.get("state") != "observed":
+            reason = "content_unbound"
+        elif sha_before is None or content.get("sha256") != sha_before:
+            # No version hash to compare with: the decode names bytes nobody
+            # took a version of, which is unproven rather than a pass.
+            reason = "content_unbound" if sha_before is None else "content_changed"
+        elif sha_after is not None and sha_after != content.get("sha256"):
+            reason = "content_changed"
+        else:
+            reason = ""
+        if reason:
+            report["quality"]["decode"] = Dimension("undecided", reason).as_dict()
+            report["quality"]["pages"] = _pages_after(
+                report["quality"]["structure"]["state"], "undecided"
+            ).as_dict()
 
     # unchanged keeps its historical meaning - this run did not observe the path
     # change - so a check that could not afford both hashes still answers False
