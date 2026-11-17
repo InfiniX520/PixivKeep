@@ -229,6 +229,13 @@ CLOSURE_R3 必须写明这一点，并把 #1 记为「断言了门禁之前行�
 3. `ReadPlan` 增补 `sql_mode`、`promise`、`copy.source_members`、`evidence.changed`；`strict_no_side_effects` 只在 `names_and_bytes` 与 `copy_verified` 时为 true——活 WAL 的 `-shm` 锁字节会变，只能承诺 `names_only`。
 4. 允许修改 `tests/test_v2_coverage_facts.py` 里两条编码旧语义的断言（`test_the_read_only_mode_follows_the_evidence_on_disk`、`test_a_file_that_changes_between_the_two_stamps_is_refused`），但必须换成更强的断言：活写者 → `ro`、无旁车 → `copy`、`immutable` 只能由调用方显式声明；`database_changed_during_read` 只属于显式 `caller_owned_snapshot` 的 immutable 读，并新增一条对照证明锁定读期间写者并发提交**不**被报这个错。其余断言一条不动。
 
+### 10.4 另有两处既有断言按同一标准被批准改写（2026-11-17，合流时）
+
+- `tests/test_v2_coverage_facts.py::test_counts_are_real_numbers_not_placeholders`（D 包，§4）：旧断言把「本 job 枚举到的画师数」当范围内总数（`artists_total == 1`）；新契约下无 `follow_snapshot_selected` 事件的 follow 任务只能给 None，故换成十个键逐项断言 + `artists_total is None` + 原因码，并另加「有快照 → 成员数」「非 follow → not_applicable」两条，未知不再是逃生口。
+- `tests/test_decode_cli.py` 的 `_report()` 助手（集成人，§2）：手工构造的报告原先没有 `content` 块，规则收紧后它必然不是通过；助手补上 content 块，另加「没有绑定不是通过」「旧形状报告不被升级成通过」两条断言。
+
+这三处（含 §10.2 第 4 条）共同的原则：断言可以换更强的说法，不能把期望值调低；每一处都在关闭报告与维护记录里列出 diff。
+
 ### 10.3 §2 的判定式按 W2 既有断言改写（2026-11-17，lane B 实施时发现）
 
 初稿写「decode ok ⟺ content.complete 且 content.sha256 == sha256_before == sha256_after」。W2 的 `test_every_stage_can_be_the_one_that_runs_out` 在 `max_bytes = 3*size` 时关闭哈希不可负担，要求 decode 仍为 `ok`、`path_stability="unknown"`、退出码非 0。那是「未知」不是「通过」，两条并不矛盾——是初稿把「没有观察」和「观察到相反」写成了同一条。
