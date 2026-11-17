@@ -16,8 +16,6 @@ import struct
 import threading
 import zlib
 
-import pytest
-
 from core import library_maintenance as maintenance
 from core import quality_check
 from core.decode_limits import DecodeLimits
