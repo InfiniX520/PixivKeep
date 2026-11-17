@@ -1224,11 +1224,16 @@ def backup_library(
     destination_root = _resolve_destination(destination_dir, source)
     siblings = _sibling_stats(source)
     # The family as this run finds it, recorded before anything opens the
-    # database.  Opening a WAL database read-only makes SQLite create its own
+    # database.  Opening a WAL database read-only can make SQLite create its own
     # bookkeeping beside it when none exists yet (measured on this host: an empty
-    # -wal and a 32 KiB -shm).  No library byte moves, but the directory listing
-    # does, and a maintenance command must not leave that for an operator to
-    # discover: the difference is reported by name.
+    # -wal and a 32 KiB -shm appear while the connection is open).  No library
+    # byte moves, but the listing can change, and a maintenance command must not
+    # leave that for an operator to discover: the difference is reported by name.
+    #
+    # What is measured is "absent before, present after", not "this run created
+    # it": another process could create the same names in the same window, and
+    # the field name (source_sidecars_created) is kept for manifest compatibility
+    # rather than as an ownership claim.
     family_before = {
         suffix: Path(str(source) + suffix).exists() for suffix in _FAMILY_SUFFIXES
     }
@@ -1385,11 +1390,14 @@ def backup_library(
             "source_shm_bytes": 0
             if siblings["-shm"] is None
             else int(siblings["-shm"]["bytes"]),
-            # Named, not hidden: these are files that did not exist before this
-            # run opened the source and do exist after it.  They carry no library
-            # content (an empty -wal and SQLite's shared-memory index), and this
-            # run does not delete them - deleting a name beside the user's library
-            # is exactly what a backup must not do on its own initiative.
+            # Named, not hidden: these names were absent before this run opened
+            # the source and are present after it.  The attribution is deliberately
+            # not exclusive (another process could have created them in the same
+            # window), so this is "appeared during the run", not "created by this
+            # read".  They carry no library content (an empty -wal and SQLite's
+            # shared-memory index), and this run does not delete them - deleting a
+            # name beside the user's library is what a backup must not do on its
+            # own initiative.
             "source_sidecars_created": source_sidecars_created,
             "source_mtime_ns": int(siblings[""]["mtime_ns"]),
             "journal_mode_source": source_report["journal_mode"],
@@ -3443,7 +3451,8 @@ def main(argv: list[str] | None = None) -> int:
                 ]
                 + (
                     [
-                        "注意: 本次读取让 SQLite 在源库旁新建了 %s（无库内容，未删除）"
+                        "注意: 本次运行期间源库旁出现了 %s"
+                        "（与本次读取的因果归属未完全证明；无库内容；未删除）"
                         % ", ".join(manifest["source_sidecars_created"])
                     ]
                     if manifest.get("source_sidecars_created")

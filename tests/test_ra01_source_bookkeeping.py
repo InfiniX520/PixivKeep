@@ -1,9 +1,14 @@
-"""A backup must name every difference it leaves beside the user's library.
+"""A backup must name every difference that appears beside the user's library.
 
-Opening a WAL database read-only makes SQLite create its own bookkeeping beside
-it when none exists yet.  No library byte moves, but the directory listing does,
-and a maintenance command must not leave that for an operator to discover
-(RA-01 adjacent; S0_CONTRACTS_R3 section 1).
+Opening a WAL database read-only can make SQLite create its own bookkeeping
+beside it when none exists yet.  No library byte moves, but the listing can
+change, and a maintenance command must not leave that for an operator to
+discover (RA-01 adjacent; S0_CONTRACTS_R3 section 1).
+
+What is asserted is "absent before, present after" - the honest name for the
+field's meaning (audit R4-04).  The causal attribution is not exclusive: another
+process could create the same names in the same window, so the report says the
+names appeared during the run, not that this read created them.
 """
 from __future__ import annotations
 
@@ -18,7 +23,7 @@ def _digest(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def test_a_backup_names_the_sidecars_its_read_created(tmp_path):
+def test_a_backup_names_the_sidecars_that_appeared_during_the_run(tmp_path):
     library = tmp_path / "library" / "library.sqlite3"
     library.parent.mkdir()
     with LibraryRepository(library):
@@ -39,7 +44,7 @@ def test_a_backup_names_the_sidecars_its_read_created(tmp_path):
     assert m.inspect_library(library)["status"] == "compatible"
 
 
-def test_a_second_backup_names_nothing_because_nothing_new_was_created(tmp_path):
+def test_a_second_backup_names_nothing_because_nothing_new_appeared(tmp_path):
     library = tmp_path / "library" / "library.sqlite3"
     library.parent.mkdir()
     with LibraryRepository(library):
@@ -50,7 +55,7 @@ def test_a_second_backup_names_nothing_because_nothing_new_was_created(tmp_path)
     assert second["source_sidecars_created"] == []
 
 
-def test_a_live_wal_library_reports_nothing_created(tmp_path):
+def test_a_live_wal_library_reports_nothing_new_during_the_run(tmp_path):
     # While a writer is open the sidecars already exist, so the read creates
     # nothing: the fact is measured, not assumed.
     library = tmp_path / "library" / "library.sqlite3"

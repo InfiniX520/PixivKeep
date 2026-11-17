@@ -52,8 +52,10 @@ PIXIVKEEP_AUDIT_REPO=<worktree> pytest verify/test_r4_findings.py -q
 
 ## 2. R4-B：`ensure_current` 不得推导账号
 
-**裁决：拒绝静默升级。** 旧 `scope.account_id == ""`、新快照有账号时，抛新稳定码
-`scope_account_requires_rebind`，要求调用方重新 `build_scope`；不得返回把旧 scope 升成新账号的对象。
+**裁决：禁止静默升级；不抛异常，返回身份不变的 scope。**（2026-11-17 修订，见 §9）
+旧 `scope.account_id == ""`、新快照有账号时，`ensure_current` 照常返回对象，但其**账号必须保持为空**
+（`account_id == ""`、`account_id_state == "not_recorded"`）：成员集相同不构成身份链，调用方若需要账号，
+必须自己重新 `build_scope` 并留下明确的重新绑定动作。
 
 **四态表**
 
@@ -62,13 +64,14 @@ PIXIVKEEP_AUDIT_REPO=<worktree> pytest verify/test_r4_findings.py -q
 | 有账号，相同 | 有账号 | 放行（成员集指纹仍须相同） |
 | 有账号，不同 | 有账号 | `scope_account_changed` |
 | 有账号 | 无账号 | `scope_account_unproven`（保持现状） |
-| 无账号 | 有账号 | **`scope_account_requires_rebind`（本轮新行为）** |
+| 无账号 | 有账号 | **放行，但返回对象账号仍为空（本轮新行为：不再升级）** |
 | 无账号 | 无账号 | 放行，返回对象账号仍为空 |
 
 理由：成员集相同只证明成员集相同；相同 snapshot 标签也不构成身份链（RA-05 原始反例正是同标签不同账号）。
-当前没有生产调用方，正适合在接线前收紧。
+当前没有生产调用方，正适合在接线前收紧。fail-closed 由报告层保证：账号未知 → `proof_limits.account=unknown`、
+`complete=false`、CLI 退出 5。
 
-**公开表面**：`ensure_current(scope, snapshot, *, groups=None)` 签名不变；新增错误码；`GroupScope` 字段不变。
+**公开表面**：`ensure_current(scope, snapshot, *, groups=None)` 签名不变；**不新增错误码**；`GroupScope` 字段不变。
 
 **现有断言改写（必须做，且要在报告里贴 diff）**
 
@@ -76,13 +79,16 @@ PIXIVKEEP_AUDIT_REPO=<worktree> pytest verify/test_r4_findings.py -q
 把「旧无账号 → 新快照有账号 → 升级成账号」写成预期行为，正是本项要否定的语义。改为：
 
 ```
-def test_ensure_current_refuses_to_invent_an_account_for_a_legacy_scope():
+def test_ensure_current_does_not_invent_an_account_for_a_legacy_scope():
     # A dump written before the account was exported cannot name one.  A later
     # snapshot naming an account does not prove the old evidence came from that
     # account: the same members and the same label are not an identity chain.
     before = scope_of(account=None)
     assert before.account_id == ""
-    assert code_of(lambda: ensure_current(before, snapshot())) == "scope_account_requires_rebind"
+    fresh = ensure_current(before, snapshot())
+    assert fresh.account_id == ""
+    assert fresh.account_id_state == "not_recorded"
+    assert fresh.fingerprint == before.fingerprint
 ```
 
 这是**唯一**允许改写的既有断言；其余（同账号放行、移动账号拒绝、快照失账号拒绝、双未知放行）一条不动。
@@ -91,7 +97,7 @@ def test_ensure_current_refuses_to_invent_an_account_for_a_legacy_scope():
 - 已知同账号 + 同成员：通过；
 - 已知不同账号：`scope_account_changed`；
 - 有账号 → 快照无账号：`scope_account_unproven`；
-- 无账号 → 快照有账号：`scope_account_requires_rebind`（不能自动 matched）；
+- 无账号 → 快照有账号：返回对象账号仍为空（不能自动 matched），报告保持 unknown/非 complete；
 - 双未知：放行且账号仍为空；
 - 同 snapshot 标签、同成员、不同账号：不能借标签通过；
 - batch 无 snapshot_id：经 `ensure_current` 后 `proof_limits.complete` 不得从 false 变 true；
@@ -144,3 +150,15 @@ def test_ensure_current_refuses_to_invent_an_account_for_a_legacy_scope():
 ## 8. 本轮不做
 
 schema 迁移、真实恢复/释放、外置卷/云盘、真实账号写回、生产部署、安装解码器、修改历史反例或历史报告、把 observed SHA 当 expected。
+## 9. 修订记录
+
+### 9.1 §2 的裁决方式按冻结反例改写（2026-11-17，lane B 开工时发现）
+
+初稿按开发指导的「推荐裁决」写：无账号旧 scope + 有账号新快照 → 抛新码 `scope_account_requires_rebind`。
+但冻结反例 `test_r4_02_legacy_scope_cannot_acquire_account_from_another_snapshot` 要求 `ensure_current` **正常返回**，
+且返回对象 `account_id == ""`；只要抛异常这条就 error，只要让它绿就永远抛不出该码。
+契约 §0 又写死了该文件逐字节不改、修后 4/4——两条不能同时满足。
+
+裁决：**按冻结反例**——不抛异常、不新增错误码，`ensure_current` 返回成员集相同、指纹相同、账号保持为空的对象；
+fail-closed 由报告层承担（`proof_limits.account=unknown`、`complete=false`、CLI 退出 5）。
+开发指导里的「推荐裁决」是建议而非验收物，验收物是冻结反例；这条偏差写进 CLOSURE_R4，不隐去。
