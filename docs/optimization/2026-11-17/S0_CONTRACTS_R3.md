@@ -84,26 +84,34 @@
 
 ```
 {"mode": "ro" | "ro+immutable" | "copy",
+ "sql_mode": "ro",                     # copy 模式下底层仍是 ro，事实不省略
  "immutable_source": "" | "caller_owned_snapshot",
  "journal": "wal" | "rollback" | "unknown",
  "sidecars": {"-journal": bool, "-wal": bool, "-shm": bool},
- "strict_no_side_effects": bool,
- "copy": {"dir": str, "members": {name: sha256}, "verified": bool} | None,
- "evidence": {"checked": [...], "created": [...], "removed": [...]}}
+ "promise": "names_and_bytes" | "names_only" | "copy_verified",
+ "strict_no_side_effects": bool,        # 仅 names_and_bytes 与 copy_verified 为 true
+ "copy": {"dir": str, "members": {name: sha256}, "verified": bool,
+          "source_members": {name: [size, mtime_ns]}, "reason": str} | None,
+ "evidence": {"checked": [...], "created": [...], "removed": [...], "changed": [...]}}
 ```
 
 **选择表（必须先逐项实测，再定稿）**
 
-| 源状态 | 采用 | 允许的副作用 |
-| --- | --- | --- |
-| rollback，无 `-journal` | `ro` + 一个读事务 | 无 |
-| rollback，有热 `-journal` | 拒绝 `source_hot_journal`（需要恢复，只读命令不做） | — |
-| WAL，`-wal` 与 `-shm` 都在 | `ro` + 读事务，参与锁协议；写者可并发提交 | 不改名、不新建 |
-| WAL，两者都不在（已 checkpoint） | `ro`（**不用 immutable**），实测确认不新建旁车 | 无 |
-| WAL，`-wal` 在、`-shm` 不在 | 严格模式拒绝 `source_sidecar_missing`；仅当调用方显式 `allow_snapshot_copy=True` 时把文件族复制到私有临时目录再读，并附前后 (size,mtime_ns,sha256) 相等证明 | 只在私有副本目录 |
-| 文件缺失 / 不可读 | `database_missing` / `database_unreadable` | — |
+| 源状态（lane C 实测，2026-11-17） | 采用 | 允许的副作用 | 证据承诺 |
+| --- | --- | --- | --- |
+| rollback，无 `-journal` | `ro` + 一个读事务 | 无 | `names_and_bytes` |
+| rollback，0 字节 `-journal` | `ro` | 无 | `names_and_bytes` |
+| rollback，`-journal` 有内容但非热 | `ro` | 无（不回滚、不改名） | `names_and_bytes` |
+| rollback，**真热 journal** | 拒绝 `source_hot_journal`（只读连接会报 attempt to write a readonly database） | — | — |
+| WAL，`-wal` 与 `-shm` 都在（写者活或残留） | `ro` + 读事务，参与锁协议；写者可并发提交 | 不新建、不改名，但 `-shm` 锁字节会变 | `names_only` |
+| WAL，`-wal` 在、`-shm` 不在 | **私有副本**（直接 `ro` 会新建 `-shm`；`immutable=1` 会读到 stale 数据） | 只在私有副本目录 | `copy_verified` |
+| WAL，两者都不在（干净关闭） | **私有副本**（实测直接 `ro` 会新建 `-wal`(0 B) 与 `-shm`(32 KiB)） | 只在私有副本目录 | `copy_verified` |
+| 文件缺失 / 目录 | `database_missing` | 无 | — |
+| 非数据库文件 | `database_unreadable`（连接成功、查询报 file is not a database） | 无 | — |
+| 调用方显式声明这是我自己的冻结副本 | `ro+immutable`（`immutable_source="caller_owned_snapshot"`） | 无（也不参与锁） | `names_and_bytes` |
 
 - `immutable=1` 只能由调用方显式声明“这是我自己的冻结副本”时使用（`immutable_source="caller_owned_snapshot"`），永远不由“旁边没有文件”推断。
+- **私有副本是默认允许的**（`allow_private_copy=True`）：冻结反例用无参 `read_only_connection(path)` 调用并期望读到数据且源目录不变，实测只有副本能同时满足。副本必须：复制主文件与存在的 `-wal`；复制前后比较每个成员 (size, mtime_ns)，并确认没有新出现的 `-shm`/`-journal`/`-wal`，任一变化即 `source_changed_during_copy`（非零、不返回数字）；副本目录在连接关闭时删除，只碰自有目录；副本读取同样在一个读事务内完成。文档要写清这一状态（WAL 且无 `-shm`）的代价是一次全量复制。
 - 文档与报告措辞必须区分两个承诺：`sql_read_only`（不执行业务写）与 `source_unchanged`（名字集合 + 摘要 + 属性不变）。只有实测通过才可说 `source_unchanged`。
 - 正常锁定读允许写者并发提交：不得把并发写一律报 `database_changed_during_read`，也不得因此返回混合视图（读事务内完成）。
 - 关闭连接后不得因“再查一次目录”改变结论。
@@ -143,7 +151,7 @@ classify(evidence, ruleset, *, visual=None)  # 内部核对 visual.rules_version
 
 1. `receipt['id']` 必须存在且 `store.get('review', id)` 能取到；取不到 → `unknown/visual_evidence_unverified, detail=review_not_stored`。**未落库的自由字典永不 sufficient。**
 2. 传入副本与已落库 review 在身份字段（account_id、artist_id、snapshot_id、sample_id、viewed、每条 evidence 的 sha256/illust_id、needs_more、rules_version、attestation）上必须一致；不一致 → `unverified, detail=receipt_copy_mismatch`（detail 里给两边摘要）。
-3. `VisualEvidence.rules_fingerprint` 来自已落库 review；缺失时状态保持原样但 **不能 sufficient**（`visual_rules_unbound`）。
+3. `VisualEvidence.rules_fingerprint` 来自已落库 review；缺失时 **state 必须降为 `unknown`，detail 为 `visual_rules_unbound`**。不允许保留 `state="sufficient"` 而只让属性返回 False：那样同一对象自相矛盾，读 state 的消费者仍可绕开。
 4. `classify` 校验：`visual.rules_version == ruleset.version` 且 `visual.rules_fingerprint == ruleset_fingerprint(ruleset)`；任一不符 → 视同 stale，不能 high。`changed_by_version` 走同一门禁。
 5. 现有门槛全部保留：sample 对齐、attestation、每页 sha256、不同作品计数、多页折叠、`available_works` 未知、快照过期、缓存摘要。
 6. `samples.review` 写新 review 时记录 `rules_fingerprint`（调用方给 `RuleSet` 或指纹字符串）；旧记录缺该字段 → 消费时 unknown，不补写、不改历史 review。
