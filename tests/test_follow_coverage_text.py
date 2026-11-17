@@ -65,9 +65,18 @@ def test_a_budget_stop_says_why_and_never_claims_completion():
     assert "查找: 因预算或限流停止（budget）" in printed
 
 
-def test_an_unproven_denominator_is_not_printed_at_all():
+def test_an_unproven_denominator_is_named_and_never_printed_as_a_number():
+    """RA-03: silence hid the hole.  A blank line reads as "nothing to say".
+
+    The unknown cohort is now named in words, and still never becomes a number:
+    no 0, no blank, no guessed total.  artworks_total keeps the old behaviour on
+    purpose - the contract asked for the artist denominator, and changing the
+    work denominator means redefining that denominator first.
+    """
     printed = text(coverage(denominators={"artists_total": None, "artworks_total": None}))
-    assert "范围内画师总数" not in printed
+    assert "范围内画师总数未知" in printed
+    assert "范围内画师总数 0 位" not in printed
+    assert "画师总数 0 位" not in printed
     assert "范围内作品总数" not in printed
     assert "共 " not in printed
 

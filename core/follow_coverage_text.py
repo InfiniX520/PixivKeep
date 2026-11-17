@@ -211,6 +211,12 @@ def render(coverage: Mapping) -> list[str]:
     artists_total = _denominator(denominators, "artists_total")
     if artists_total is not None:
         lines.append("范围内画师总数 %d 位（有记录可对）。" % artists_total)
+    else:
+        # An unknown denominator must not be printed as a blank line or as
+        # "0 位": the first hides the hole, the second invents a number.  RA-03
+        # is why this sentence exists - the facts can now say "the cohort is
+        # unknown" while still counting the artists this job really reached.
+        lines.append("范围内画师总数未知（没有可对的分母；不显示为 0）。")
     artworks_total = _denominator(denominators, "artworks_total")
     if artworks_total is not None:
         lines.append("范围内作品总数 %d 件（有记录可对）。" % artworks_total)
