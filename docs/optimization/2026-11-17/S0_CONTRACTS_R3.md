@@ -66,7 +66,8 @@
 
 **判定规则**
 
-- `quality.decode.state == "ok"` 当且仅当：`content.state == "observed"` 且 `content.complete` 且 `content.sha256 == sha256_before == sha256_after`。任一不成立 → decode 降为 `undecided`，reason 为 `content_unbound`（读不全）或 `content_changed`（摘要不一致）。
+- `quality.decode.state == "ok"` 当且仅当：`content.state == "observed"` 且 `content.complete` 且 `content.sha256 == sha256_before`，且**不存在任何相反的观察**：`sha256_after` 缺失（预算不足/取消）= 未观察，由 `path_stability=unknown` 与非 0 退出表达；`sha256_after` 存在且不同 = `content_changed`；结构走查摘要、解码通道摘要、前后版本摘要四者中任意两个不一致 = `content_changed`。任一相反观察成立 → decode 降为 `undecided`。
+  修订理由（见 §10.3）：初稿要求 `sha256_after` 也必须相等，与 W2 既有断言冲突——预算恰好不足最后一段时关闭哈希不可负担，而那次运行本来就以非 0 结束，不是成功。把「缺失的观察」与「相反的观察」混成同一条会把未知当成证据。
 - 结构检查、解码、摘要必须来自同一份内容：打开一次描述符，结构/解码消费该流（或该流读出的有界缓冲），摘要对同一批字节计算。禁止“先按路径哈希、再按路径解码”。
 - 读量全部走现有 `ReadMeter`/`CommandBudget` 计费；内存不得无界（上界 `limits.max_bytes`）；取消按块检查。
 - `bytes_read` 缺失仍是 `None`，不得当 0。
@@ -227,4 +228,10 @@ CLOSURE_R3 必须写明这一点，并把 #1 记为「断言了门禁之前行�
 2. 「WAL、`-wal` 在、`-shm` 不在 → 严格拒绝，仅显式 opt-in 才复制」改为**默认复制**，理由同上并见 §3 新增条目。
 3. `ReadPlan` 增补 `sql_mode`、`promise`、`copy.source_members`、`evidence.changed`；`strict_no_side_effects` 只在 `names_and_bytes` 与 `copy_verified` 时为 true——活 WAL 的 `-shm` 锁字节会变，只能承诺 `names_only`。
 4. 允许修改 `tests/test_v2_coverage_facts.py` 里两条编码旧语义的断言（`test_the_read_only_mode_follows_the_evidence_on_disk`、`test_a_file_that_changes_between_the_two_stamps_is_refused`），但必须换成更强的断言：活写者 → `ro`、无旁车 → `copy`、`immutable` 只能由调用方显式声明；`database_changed_during_read` 只属于显式 `caller_owned_snapshot` 的 immutable 读，并新增一条对照证明锁定读期间写者并发提交**不**被报这个错。其余断言一条不动。
+
+### 10.3 §2 的判定式按 W2 既有断言改写（2026-11-17，lane B 实施时发现）
+
+初稿写「decode ok ⟺ content.complete 且 content.sha256 == sha256_before == sha256_after」。W2 的 `test_every_stage_can_be_the_one_that_runs_out` 在 `max_bytes = 3*size` 时关闭哈希不可负担，要求 decode 仍为 `ok`、`path_stability="unknown"`、退出码非 0。那是「未知」不是「通过」，两条并不矛盾——是初稿把「没有观察」和「观察到相反」写成了同一条。
+
+裁决：按 lane B 的实现改写判定式（见 §2 第一条），**不**改 W2 的既有期望值；并要求 `_decode_outcome` 显式把「未绑定」判成非 0（集成人串行接入），使这条规则不只依赖 decode 状态降级。
 

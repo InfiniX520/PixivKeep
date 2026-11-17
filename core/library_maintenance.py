@@ -1223,6 +1223,15 @@ def backup_library(
     source = _resolve_target(path)
     destination_root = _resolve_destination(destination_dir, source)
     siblings = _sibling_stats(source)
+    # The family as this run finds it, recorded before anything opens the
+    # database.  Opening a WAL database read-only makes SQLite create its own
+    # bookkeeping beside it when none exists yet (measured on this host: an empty
+    # -wal and a 32 KiB -shm).  No library byte moves, but the directory listing
+    # does, and a maintenance command must not leave that for an operator to
+    # discover: the difference is reported by name.
+    family_before = {
+        suffix: Path(str(source) + suffix).exists() for suffix in _FAMILY_SUFFIXES
+    }
     if siblings[""] is None:
         raise BackupError("library_missing", str(source))
     if int(siblings[""]["bytes"]) == 0:
@@ -1287,6 +1296,11 @@ def backup_library(
         _stop_check(stop, "verify")
 
         after = _group(source)
+        source_sidecars_created = [
+            suffix
+            for suffix in _FAMILY_SUFFIXES
+            if not family_before[suffix] and Path(str(source) + suffix).exists()
+        ]
         after_counts = _source_counts(source)
         copy_report = inspect_library(copy_path)
         sidecar_report = _inspect_sidecars(copy_path)
@@ -1371,6 +1385,12 @@ def backup_library(
             "source_shm_bytes": 0
             if siblings["-shm"] is None
             else int(siblings["-shm"]["bytes"]),
+            # Named, not hidden: these are files that did not exist before this
+            # run opened the source and do exist after it.  They carry no library
+            # content (an empty -wal and SQLite's shared-memory index), and this
+            # run does not delete them - deleting a name beside the user's library
+            # is exactly what a backup must not do on its own initiative.
+            "source_sidecars_created": source_sidecars_created,
             "source_mtime_ns": int(siblings[""]["mtime_ns"]),
             "journal_mode_source": source_report["journal_mode"],
             "journal_mode_copy": copy_report["journal_mode"],
@@ -3111,6 +3131,12 @@ def _decode_outcome(reports: list[dict[str, object]]) -> int:
     that changed while it was being checked is not a failure (nothing was
     proven bad) and it is not a pass either (the verdict is about bytes that
     are no longer there), so it lands on 5 with the other not-proven cases.
+
+    A verdict also has to name the bytes it is about.  check_file() already
+    demotes a decode whose receipt does not match the version it hashed, and
+    this line keeps a future edit from turning that demotion into the only
+    guard: a report that says "ok" while its content block says the bytes are
+    unknown is a 5, not a pass (RA-06, S0_CONTRACTS_R3 section 2).
     """
     structure = [
         str((item.get("quality") or {}).get("structure", {}).get("state"))
@@ -3126,6 +3152,12 @@ def _decode_outcome(reports: list[dict[str, object]]) -> int:
     if any(state != "ok" for state in structure) or any(state != "ok" for state in decode):
         return _EXIT_INCOMPLETE
     if any(state != "unchanged" for state in stability):
+        return _EXIT_INCOMPLETE
+    # The five dimensions answer "what was checked"; content answers "which
+    # bytes".  A report with no content block, or one whose content state is not
+    # "observed", cannot say its decode describes this file - so it is not a
+    # pass, whatever the dimension says.
+    if not all(bool(item.get("content_bound")) for item in reports):
         return _EXIT_INCOMPLETE
     return 0
 
@@ -3146,6 +3178,24 @@ def _decode_lines(reports: list[dict[str, object]], code: int) -> list[str]:
             lines.append(
                 "  %s: %s%s"
                 % (label, entry.get("state"), ("（%s）" % reason) if reason else "")
+            )
+        content = item.get("content") or {}
+        content_state = str(content.get("state") or "unknown")
+        if content_state == "observed":
+            digest = str(content.get("sha256") or "")
+            lines.append(
+                "  内容: 已绑定 %s（读取 %s%s）"
+                % (
+                    digest[:12] if digest else "未知",
+                    "未知" if content.get("bytes") is None else "%d 字节" % int(content["bytes"]),
+                    "，整文件" if content.get("complete") else "，未读完",
+                )
+            )
+        else:
+            content_reason = content.get("reason")
+            lines.append(
+                "  内容: 未绑定（%s%s）"
+                % (content_state, ("，" + str(content_reason)) if content_reason else "")
             )
         stability = str(item.get("path_stability") or "unknown")
         stability_reason = item.get("path_stability_reason")
@@ -3390,7 +3440,15 @@ def main(argv: list[str] | None = None) -> int:
                         manifest["source_checks"]["main_unchanged"],
                         manifest["source_checks"]["group_unchanged"],
                     ),
-                ],
+                ]
+                + (
+                    [
+                        "注意: 本次读取让 SQLite 在源库旁新建了 %s（无库内容，未删除）"
+                        % ", ".join(manifest["source_sidecars_created"])
+                    ]
+                    if manifest.get("source_sidecars_created")
+                    else []
+                ),
             )
             return 0
         if arguments.command == "verify":
