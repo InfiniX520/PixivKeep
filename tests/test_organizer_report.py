@@ -22,6 +22,10 @@ from organizer.report import (
 def snapshot(artists, *, complete=True, memberships=None):
     return {
         "id": "snap-1",
+        # The production exporter always writes the account the snapshot was
+        # taken from (organizer/snapshots.py); a fixture without it is not a
+        # snapshot a report may call complete (RA-05).
+        "account_id": "acct-1",
         "artists": artists,
         "memberships": (
             memberships

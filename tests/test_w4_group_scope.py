@@ -209,6 +209,10 @@ def test_a_recomputed_fingerprint_is_outside_what_a_digest_can_prove():
     dump["artist_ids"] = ["999"]
     dump["blocks"] = [["show", ["999"]]]
     dump["fingerprint"] = forged.fingerprint
+    # Two consistency digests now: the member set and the identity (account,
+    # snapshot, members).  Recomputing both is the same act as recomputing one,
+    # which is exactly what this test says a digest cannot prevent.
+    dump["source"]["identity_fingerprint"] = forged.source["identity_fingerprint"]
     accepted = GroupScope.from_dict(dump)
     assert accepted.artist_ids == ("999",)
     assert accepted.fingerprint == forged.fingerprint

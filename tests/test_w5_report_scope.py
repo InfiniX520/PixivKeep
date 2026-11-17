@@ -21,6 +21,9 @@ from organizer.report import ReportError, build_report
 def snapshot(ids=("1", "2"), *, complete=True):
     return {
         "id": "snap-1",
+        # Exported snapshots carry the account (organizer/snapshots.py); without
+        # it the scope cannot be tied to an account and the report says unknown.
+        "account_id": "acct-1",
         "status": "complete",
         "memberships_complete": complete,
         "artists": {

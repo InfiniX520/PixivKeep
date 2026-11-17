@@ -45,6 +45,9 @@ def snapshot(artists=None, *, complete=True):
     return {
         "snapshot_id": "snap-1",
         "account_ref": "acct-1",
+        # The account the snapshot was taken from, under the field name the
+        # exporter writes; the report gate compares it with the batch (RA-05).
+        "account_id": "acct-1",
         "memberships": partitions,
         "memberships_complete": complete,
         "artists": {
