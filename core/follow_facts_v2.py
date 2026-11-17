@@ -167,6 +167,10 @@ _ROLLBACK_JOURNAL_MAGIC = b"\xd9\xd5\x05\xf9\x20\xa1\x63\xd7"
 _ROLLBACK_JOURNAL_HEADER = 28
 _PRIVATE_PREFIX = "pixivkeep-read-"
 _COPY_CHUNK = 1024 * 1024
+#: Independent attempts one private copy gets before it refuses to answer.  A
+#: retry re-observes the source, so two are enough to survive a writer that
+#: commits once; a store that keeps moving under us gets no number at all.
+_COPY_ATTEMPTS = 2
 
 
 def _plain(value: Any) -> Any:
@@ -488,6 +492,20 @@ def read_only_mode(path: str | Path, *, immutable_source: str = "") -> str:
     return read_plan(path, immutable_source=immutable_source).mode
 
 
+def _copy_members(family: Mapping[str, Mapping[str, Any]], database: Path) -> list[str]:
+    """The suffixes one attempt has to copy, read from that attempt's snapshot.
+
+    Only the main file and an existing -wal carry database content.  The list is
+    derived from the same observation the attempt compares against afterwards, so
+    a -wal that appeared after the previous attempt is part of this attempt's
+    input instead of being silently dropped (R4-01).
+    """
+    suffixes = list(COPY_SUFFIXES)
+    if (database.name + "-wal") in family:
+        suffixes.append("-wal")
+    return suffixes
+
+
 def _private_copy(
     database: Path, *, private_root: object = None, stop: object = None
 ) -> tuple[Path, dict[str, Any], dict[str, list[str]]]:
@@ -495,19 +513,29 @@ def _private_copy(
 
     Only the main file and an existing -wal are copied.  The copy is usable only
     if it is a *moment*: every family member's (size, mtime_ns) is taken before
-    and after, and no member that did not exist may appear.  Either moves and
-    the copy is thrown away and tried once more; still moving means
+    and after, and no member that did not exist may appear.  Either moves and the
+    attempt is thrown away and rebuilt; still moving after the last attempt means
     source_changed_during_copy - never a number that is "probably right".
 
+    Every attempt is independent (R4-01).  Its input is the family as observed at
+    that attempt's start, it is written into its own subdirectory, and its result
+    is what the returned facts describe.  A retry that reused the first attempt's
+    member list would copy a database that never existed: the first attempt's
+    observed change is usually *the* -wal that carries a committed transaction,
+    so the second attempt has to include it.  The successful attempt is promoted
+    to the private root and the losing attempts are removed, so the directory the
+    connection opens never contains a member from an earlier attempt.
+
     The copy's digests are computed while it is written, so the source is read
-    exactly once (the before/after attributes prove it did not move meanwhile).
+    exactly once per attempt (the before/after attributes prove it did not move
+    meanwhile).  That is also this function's honest boundary: consistency is
+    argued from names and (size, mtime_ns), not from a second full read, so a
+    writer that rewrites the file in place and restores the exact modification
+    time can still pass the check.
 
     SQLite then gets the copy, not the library: whatever it creates there (a
     -shm index, an empty -wal) lives in our own directory and goes away with it.
     """
-    members = list(COPY_SUFFIXES)
-    if Path(str(database) + "-wal").is_file():
-        members.append("-wal")
     try:
         root = Path(
             tempfile.mkdtemp(
@@ -519,56 +547,83 @@ def _private_copy(
         raise V2FactsError(
             "private_copy_failed", "%s (%s)" % (database, type(error).__name__)
         ) from None
-    target = root / database.name
-    before = _family_names(database)
     difference = {"created": [], "removed": [], "changed": []}
-    for _attempt in (1, 2):
-        digests: dict[str, str] = {}
-        source_members: dict[str, list[int]] = {}
-        try:
-            for suffix in members:
-                _check_stop(stop, "private_copy")
-                source = Path(str(database) + suffix)
-                digests[source.name] = _copy_hashed(
-                    source, Path(str(target) + suffix), stop=stop
-                )
-                source_members[source.name] = [
-                    int(before[source.name]["size"]),
-                    int(before[source.name]["mtime_ns"]),
-                ]
-        except OSError as error:
-            _discard_private(root)
-            raise V2FactsError(
-                "private_copy_failed", "%s (%s)" % (database, type(error).__name__)
-            ) from None
-        except BaseException:
-            _discard_private(root)
-            raise
-        after = _family_names(database)
-        difference = _family_difference(before, after)
-        # A copied member whose (size, mtime_ns) moved is not the file we copied
-        # any more, even though its name is still there: that is the difference
-        # between "the copy has a name" and "the copy is the database".
-        moved = [
-            name for name in digests if before.get(name) != after.get(name)
-        ]
-        difference["changed"] = sorted(set(difference["changed"]) | set(moved))
-        if not difference["created"] and not difference["removed"] and not moved:
+    attempts = 0
+    dropped: list[str] = []
+    previous_names: list[str] = []
+    try:
+        for attempt in range(1, _COPY_ATTEMPTS + 1):
+            attempts = attempt
+            before = _family_names(database)
+            members = _copy_members(before, database)
+            names = [database.name if suffix == "" else database.name + suffix
+                     for suffix in members]
+            dropped = sorted(set(previous_names) - set(names))
+            attempt_dir = root / ("attempt-%d" % attempt)
+            try:
+                attempt_dir.mkdir()
+            except OSError as error:
+                raise V2FactsError(
+                    "private_copy_failed", "%s (%s)" % (database, type(error).__name__)
+                ) from None
+            digests: dict[str, str] = {}
+            source_members: dict[str, list[int]] = {}
+            try:
+                for suffix in members:
+                    _check_stop(stop, "private_copy")
+                    source = Path(str(database) + suffix)
+                    facts = before.get(source.name)
+                    if facts is None:
+                        # The member vanished between the family observation and
+                        # the copy: that is a change, and the retry decides.
+                        raise OSError("%s disappeared during the copy" % source)
+                    digests[source.name] = _copy_hashed(
+                        source, attempt_dir / source.name, stop=stop
+                    )
+                    source_members[source.name] = [
+                        int(facts["size"]),
+                        int(facts["mtime_ns"]),
+                    ]
+            except OSError as error:
+                raise V2FactsError(
+                    "private_copy_failed", "%s (%s)" % (database, type(error).__name__)
+                ) from None
+            after = _family_names(database)
+            difference = _family_difference(before, after)
+            # A copied member whose (size, mtime_ns) moved is not the file we
+            # copied any more, even though its name is still there: that is the
+            # difference between "the copy has a name" and "the copy is the
+            # database".
+            moved = [name for name in digests if before.get(name) != after.get(name)]
+            difference["changed"] = sorted(set(difference["changed"]) | set(moved))
+            if difference["created"] or difference["removed"] or moved:
+                # The source moved under this attempt: the next one observes the
+                # family again, so the new member list includes what appeared.
+                previous_names = names
+                continue
+            for name in digests:
+                # Same volume, same directory: a rename, not a second copy.
+                (attempt_dir / name).replace(root / name)
+            for stale in root.glob("attempt-*"):
+                shutil.rmtree(str(stale), ignore_errors=True)
             return root, {
                 "dir": str(root),
                 "members": digests,
                 "verified": True,
                 "source_members": source_members,
                 "reason": "复制前后源文件族的名字集合与 (size, mtime_ns) 未变",
+                "attempts": attempts,
+                "dropped_members": dropped,
             }, difference
-        # The source moved under the copy: try once more from the new state.
-        before = after
-    _discard_private(root)
-    raise V2FactsError(
-        "source_changed_during_copy",
-        "%s 在复制期间被改写（%s），私有副本不能代表任何单一时刻"
-        % (database, ", ".join(difference["created"] + difference["removed"])),
-    )
+        raise V2FactsError(
+            "source_changed_during_copy",
+            "%s 在复制期间被改写（%s），私有副本不能代表任何单一时刻"
+            % (database, ", ".join(difference["created"] + difference["removed"])),
+        )
+    except BaseException:
+        # Cancelled, failed or refused: nothing this run created stays behind.
+        _discard_private(root)
+        raise
 
 
 def _discard_private(root: object) -> None:
