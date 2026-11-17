@@ -219,14 +219,21 @@ def test_a_target_that_cannot_be_created_is_a_typed_refusal(tmp_path, monkeypatc
     real_mkdir = Path.mkdir
 
     def refusing(self, *args, **kwargs):
-        if self.name == "blocked":
+        if self.name.startswith(m._STAGING_PREFIX):
             raise PermissionError("synthetic no permission")
         return real_mkdir(self, *args, **kwargs)
 
     monkeypatch.setattr(Path, "mkdir", refusing)
     with pytest.raises(m.BackupError) as info:
         m.backup_library(source, tmp_path / "backups", label="blocked")
-    assert info.value.code == "backup_directory_failed"
+    # The artifact directory is no longer created directly: the run builds in a
+    # private staging directory and publishes it with one rename, so the name
+    # that can fail to be created is the staging one.  The refusal stays typed,
+    # nothing is published under the label, and no staging shell is left.
+    assert info.value.code == "backup_staging_failed"
+    root = tmp_path / "backups"
+    assert not (root / "blocked").exists()
+    assert [item for item in root.iterdir() if item.name.startswith(m._STAGING_PREFIX)] == []
 
 
 def test_a_late_manifest_failure_is_typed_and_names_the_residual(tmp_path, monkeypatch):
