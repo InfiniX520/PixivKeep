@@ -16,12 +16,13 @@ import pytest
 from core.collection_desktop import DesktopRuntime
 from core.follow_coverage import build_coverage
 from core.follow_facts_v2 import (
+    READ_FROM_COPY,
     READ_ONLY,
     READ_ONLY_IMMUTABLE,
     V2FactsError,
     coverage_facts,
     read_only_connection,
-    read_only_mode,
+    read_plan,
 )
 from core.library_repository import LibraryRepository
 from core.report_commands import ReportError
@@ -126,21 +127,58 @@ def test_reading_the_facts_neither_writes_nor_leaves_a_journal(tmp_path):
 
 
 def test_the_read_only_mode_follows_the_evidence_on_disk(tmp_path):
-    """Quiescent store: no lock and no index file.  Live writer: take part in
-    the locking protocol instead, because a -shm already exists there."""
+    """The mode is a decision taken from the files on disk, and every branch of
+    it is measured rather than inferred.
+
+    RA-02: this test used to assert that a database with no -wal or -shm next to
+    it is read "immutable".  Measured, that was wrong in both directions.  A
+    cleanly closed WAL database is quiescent, yet a direct mode=ro connection
+    still creates -wal (0 bytes) and -shm (32 KiB) inside the library directory,
+    so it is read from a private copy instead.  A database a writer has open is
+    read directly, and the only thing that moves there is SQLite's own -shm lock
+    index.  immutable is never inferred at all: it skips locking and change
+    detection, so only a caller that owns a frozen snapshot may ask for it.
+    """
     library, _ = _finished_job(tmp_path)
-    assert read_only_mode(library) == READ_ONLY_IMMUTABLE
-    (Path(str(library) + "-shm")).write_bytes(b"")
-    assert read_only_mode(library) == READ_ONLY
+    private_root = tmp_path / "private"
+    private_root.mkdir()
+    quiescent = read_plan(library)
+    assert quiescent.mode == READ_FROM_COPY
+    assert quiescent.promise == "copy_verified"
+    # Not claimed until the copy has been proven, which is what the connection
+    # does: a plan alone has not copied anything yet.
+    assert quiescent.strict_no_side_effects is False
+    connection = read_only_connection(library, private_root=private_root)
+    try:
+        assert connection.plan.strict_no_side_effects is True
+        assert connection.plan.copy["verified"] is True
+    finally:
+        connection.close()
+
+    writer = sqlite3.connect(library, isolation_level=None)
+    try:
+        writer.execute("SELECT COUNT(*) FROM jobs").fetchone()
+        live = read_plan(library)
+    finally:
+        writer.close()
+    assert live.mode == READ_ONLY
+    assert live.promise == "names_only"
+    assert live.strict_no_side_effects is False
+
+    frozen = read_plan(library, immutable_source="caller_owned_snapshot")
+    assert frozen.mode == READ_ONLY_IMMUTABLE
+    with pytest.raises(V2FactsError) as raised:
+        read_plan(library, immutable_source="there-is-no-wal-next-to-it")
+    assert raised.value.code == "immutable_source_invalid"
 
 
-def test_a_file_that_changes_between_the_two_stamps_is_refused(tmp_path, monkeypatch):
-    """The before/after comparison is wired, and it refuses rather than reports.
+def test_an_immutable_snapshot_that_moves_under_the_read_is_refused(tmp_path, monkeypatch):
+    """database_changed_during_read belongs to the caller-owned immutable read.
 
-    A concurrently rewritten main file means the numbers describe no single
-    moment; that is not a coverage verdict.  The stamp is injected here because
-    making a real writer collide inside our own read transaction would only
-    prove that SQLite takes locks.
+    An immutable connection holds no lock, so the main file is the only thing
+    that can tell us whether the bytes moved.  A locking read is different, and
+    the control below proves it: a writer committing while we read is not a
+    reason to refuse the report.
     """
     from core import report_commands as commands
 
@@ -155,9 +193,43 @@ def test_a_file_that_changes_between_the_two_stamps_is_refused(tmp_path, monkeyp
 
     monkeypatch.setattr(commands, "_file_stamp", stamp)
     with pytest.raises(ReportError) as raised:
-        commands.coverage_report_v2(library, job["job_id"])
+        commands.coverage_report_v2(
+            library, job["job_id"], immutable_source="caller_owned_snapshot"
+        )
     assert raised.value.code == "database_changed_during_read"
     assert len(seen) == 2
+
+
+def test_a_writer_committing_during_a_locking_read_is_not_a_refusal(tmp_path, monkeypatch):
+    """The control for the test above: concurrency is allowed, not refused.
+
+    A report about a database the application is writing has to work.  SQLite's
+    read transaction sees one moment, the writer's commit lands outside it, and
+    only the names of the source family are promised to stay put.
+    """
+    from core import report_commands as commands
+
+    library, job = _finished_job(tmp_path)
+    writer = sqlite3.connect(library, isolation_level=None)
+    writer.execute("SELECT COUNT(*) FROM jobs").fetchone()
+    real = commands.coverage_facts
+
+    def commit_while_reading(connection, job_id):
+        writer.execute(
+            "INSERT INTO events(event_uuid, job_id, kind, safe_payload, created_at)"
+            " VALUES ('ra02-control', ?, 'note', '{}', 'now')",
+            (job_id,),
+        )
+        return real(connection, job_id)
+
+    monkeypatch.setattr(commands, "coverage_facts", commit_while_reading)
+    try:
+        payload = commands.coverage_report_v2(library, job["job_id"])
+    finally:
+        writer.close()
+    assert payload["read"]["plan"]["mode"] == READ_ONLY
+    assert payload["read"]["plan"]["promise"] == "names_only"
+    assert payload["read"]["source"]["ok"] is True
 
 
 def test_desktop_summary_reads_the_v2_library_and_names_its_provider(tmp_path):
