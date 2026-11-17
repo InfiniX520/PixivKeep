@@ -1,7 +1,7 @@
 {
   "project": "PixivKeep",
   "description": "Pixiv 原图收藏与整理工具；长期归档与恢复开发中",
-  "last_updated": "2026-11-15",
+  "last_updated": "2026-11-17",
   "sessions": [
     {
       "session_date": "2026-07-30",
@@ -2478,6 +2478,33 @@
         "maintain.py has no --stop entry although backup_library(stop=) exists",
         "the scan summary still prints stats.get('bytes_hashed', 0) for an unmeasured count"
       ]
+    },
+    {
+      "session_date": "2026-11-17",
+      "summary": "Independent 944ee13 follow-up audit: original EA regressions pass, six adjacent RA findings remain; preserve prior audit and navigation without product edits",
+      "round": "R10-followup",
+      "candidate": "944ee13ea864c47f8ea068292b4d4205d4fa2315",
+      "audit_branch": "audit/u1u2-e1-followup-20261117",
+      "daily_commit": "4ba891e34c312f049ef933eeb517da1e928b7575",
+      "report": "docs/audits/2026-11-17-944-followup/README.md",
+      "prior_findings": "docs/audits/2026-11-15-u1u2-e1-r2-independent/FINDINGS.md",
+      "development_guide": "docs/audits/2026-11-15-u1u2-e1-r2-independent/DEVELOPMENT_GUIDE.md",
+      "verification": {
+        "body": {"tests":3427,"passed":3422,"failed":0,"errors":0,"skipped":5},
+        "tk": {"tests":118,"passed":118,"failed":0,"errors":0,"skipped":0},
+        "presentation": {"tests":9,"passed":9,"failed":0,"errors":0,"skipped":0},
+        "existing_total":3554,
+        "existing_passed":3549,
+        "frozen_ea":15,
+        "adjacent_ra": {"tests":13,"passed":3,"failed":10,"errors":0,"skipped":0}
+      },
+      "product_source_changed": false,
+      "business_data_changed": false,
+      "deployed": false,
+      "merged_to_main": false,
+      "production_accepted": false,
+      "worktree_inventory": {"total":141,"active":68,"archived":73,"dirty":16,"deleted":0,"moved":0},
+      "open_gaps": ["RA-01 SQLite foreign sidecar deletion", "RA-02 read-only WAL creates SHM", "RA-03 V2 relation counts", "RA-04 canonical review binding", "RA-05 account scope identity", "RA-06 quality ABA binding"]
     }
   ]
 }

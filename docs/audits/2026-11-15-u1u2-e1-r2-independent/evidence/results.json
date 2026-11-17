@@ -1,0 +1,348 @@
+{
+  "candidate": "944ee13ea864c47f8ea068292b4d4205d4fa2315",
+  "previous_audit": "75f6ad6e5171f52019a14608b15ec1813a201baf",
+  "audit_branch": "audit/u1u2-e1-r2-independent-20261115",
+  "product_edits": false,
+  "synthetic_only": true,
+  "suite": {
+    "total": 3551,
+    "passed": 3547,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 4
+  },
+  "runs": [
+    {
+      "name": "previous_ea",
+      "returncode": 0,
+      "total": 15,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 15,
+      "xml_sha256": "b03ccb2b4982dc463e8770fe6d86aee9f6196caf9e13e53977744ce41eb6b657",
+      "skips": []
+    },
+    {
+      "name": "previous_ux",
+      "returncode": 0,
+      "total": 17,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 17,
+      "xml_sha256": "bfe8fa51969e5435df5b350f5a455b5f457a3e31da60eb702dc48fd754dda9d0",
+      "skips": []
+    },
+    {
+      "name": "full01",
+      "returncode": 0,
+      "total": 3424,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 4,
+      "passed": 3420,
+      "xml_sha256": "9c9e68826ec5334068201af8022fa563edb209f5ac12cb5c3b01a73a3873c00e",
+      "skips": [
+        {
+          "name": "test_real_symlink_file_is_rejected_when_platform_supports_it",
+          "message": "real reparse point unavailable in isolated test directory: OSError"
+        },
+        {
+          "name": "test_real_symlink_ancestor_is_rejected_even_when_target_is_inside_root",
+          "message": "real reparse point unavailable in isolated test directory: OSError"
+        },
+        {
+          "name": "test_real_symlink_root_is_rejected",
+          "message": "real reparse point unavailable in isolated test directory: OSError"
+        },
+        {
+          "name": "test_w_phase_local_boundaries_are_not_wired_into_reuse_yet",
+          "message": "W 阶段剩余边界（本轮只登记，不强行通过）：根不可用/重解析点/读取中变化已能进入 needs_verification（见 test_u1a_reuse_gate 与 artifact_health 契约），但仍缺：①根不可用/外置卷的 UI 与恢复动作，不把整库当成丢失；②链接/重解析点指向根外时的端到端拒绝断言；③同一批次同一 artifact 只观察一次的缓存；④跨会话不复用旧缓存；⑤快速核验不得升级为严格复用的端到端用例。"
+        }
+      ]
+    },
+    {
+      "name": "collection_view",
+      "returncode": 0,
+      "total": 25,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 25,
+      "xml_sha256": "9cc1c27815f3d7cfd0d5ac2e9fbf6b0d911af626254d8e98c2eb635f03ce3d5d",
+      "skips": []
+    },
+    {
+      "name": "collection_verification_panel",
+      "returncode": 0,
+      "total": 89,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 89,
+      "xml_sha256": "5c343cd209d151e4a34e308d6e0e05fc9f6c4348f464b11b981cf7fd760531ae",
+      "skips": []
+    },
+    {
+      "name": "scaled_window",
+      "returncode": 0,
+      "total": 1,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 1,
+      "xml_sha256": "9e35898c9344cb92ffbd8dd439a0fa729a98313d049d45f3411145f3a022c84b",
+      "skips": []
+    },
+    {
+      "name": "coverage_page",
+      "returncode": 0,
+      "total": 3,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 3,
+      "xml_sha256": "9aba18d098fa9c6f565f7604e44726ac9a8b7108b82fe28d0bce2d73e12fe030",
+      "skips": []
+    },
+    {
+      "name": "collection_presentation1",
+      "returncode": 0,
+      "total": 1,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 1,
+      "xml_sha256": "df4aebe6cc61143fee9ded7c51640d0f8a15fb94fc5aec41628cac62818ee183",
+      "skips": []
+    },
+    {
+      "name": "collection_presentation2",
+      "returncode": 0,
+      "total": 1,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 1,
+      "xml_sha256": "3ef15094dfee16f0ce19b7d6a2954cd28309847598f286f60aff538b8dc9c6ba",
+      "skips": []
+    },
+    {
+      "name": "collection_presentation3",
+      "returncode": 0,
+      "total": 1,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 1,
+      "xml_sha256": "63cfa4bbb3d269d9d8ab7e81a8bf19245e0e4cc0a9e7df1e02c2cdd827007cb0",
+      "skips": []
+    },
+    {
+      "name": "collection_presentation4",
+      "returncode": 0,
+      "total": 1,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 1,
+      "xml_sha256": "d8a1b8d16b3ae898b41af0316a546a0df32f30fa2899d5717578207b84935d90",
+      "skips": []
+    },
+    {
+      "name": "source_presentation1",
+      "returncode": 0,
+      "total": 1,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 1,
+      "xml_sha256": "4e15377fcac4bff193f5239c72f8c0dc9a5f67539239cdf428319ded58ca3e24",
+      "skips": []
+    },
+    {
+      "name": "source_presentation2",
+      "returncode": 0,
+      "total": 1,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 1,
+      "xml_sha256": "4d18d0d45c5d1a6d770ec5e95f56b7d53deba3daea5ad3759890fbc5e09032c5",
+      "skips": []
+    },
+    {
+      "name": "source_presentation3",
+      "returncode": 0,
+      "total": 1,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 1,
+      "xml_sha256": "c6cdbf7fb819ba84579e2387bcf1736b2b9112e29fcc6b4d5f90bb771534a700",
+      "skips": []
+    },
+    {
+      "name": "source_presentation4",
+      "returncode": 0,
+      "total": 1,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 1,
+      "xml_sha256": "b4dd129a6004e4f613b6b8c2e619e238baadbb6e621e31ead65bcfcbf5d65eb7",
+      "skips": []
+    },
+    {
+      "name": "source_presentation5",
+      "returncode": 0,
+      "total": 1,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 1,
+      "xml_sha256": "c7424da534ea119231ea99d46a04fef14a9e5bb0a141c5dde0a7569b2fe48065",
+      "skips": []
+    },
+    {
+      "name": "archive_tool",
+      "returncode": 0,
+      "total": 23,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 23,
+      "xml_sha256": "c02a5d31b5720edaa5b0b048d470a69e2e2c624f614badd2d7e93643c8e58c5e",
+      "skips": []
+    },
+    {
+      "name": "previous_closure",
+      "returncode": 0,
+      "total": 14,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 14,
+      "xml_sha256": "e8685ffc3cb342447e6d695fd25c0801e40d03cc93733b29aecd35bf6635565f",
+      "skips": []
+    }
+  ],
+  "adjacent_probes": {
+    "total": 13,
+    "failed": 10,
+    "errors": 0,
+    "skipped": 0,
+    "passed": 3,
+    "xml_sha256": "28dd375ffa095669c03bb04ad19b08169e6d4756dca86ad80516338ab6951893",
+    "skips": []
+  },
+  "probe_source_sha256": "7c7914066dca4166cb1eccd75b6e0ddf2dcb2dbe3abe8d1ef6a7b7a9ac7c0214",
+  "probe_cases": [
+    {
+      "name": "test_ra01_sqlite_does_not_write_or_remove_foreign_sidecar[-journal]",
+      "result": "failed"
+    },
+    {
+      "name": "test_ra01_sqlite_does_not_write_or_remove_foreign_sidecar[-wal]",
+      "result": "failed"
+    },
+    {
+      "name": "test_ra01_sqlite_does_not_write_or_remove_foreign_sidecar[-shm]",
+      "result": "passed"
+    },
+    {
+      "name": "test_ra02_wal_without_shm_is_not_modified_by_read_only_connection",
+      "result": "failed"
+    },
+    {
+      "name": "test_ra03_v2_artist_total_includes_snapshot_members_without_items",
+      "result": "failed"
+    },
+    {
+      "name": "test_ra04_visual_receipt_cannot_be_reused_under_new_rule_version",
+      "result": "failed"
+    },
+    {
+      "name": "test_ra05_scope_keeps_account_identity_for_report_gate",
+      "result": "failed"
+    },
+    {
+      "name": "test_control_classification_with_missing_visual_evidence_stays_low",
+      "result": "passed"
+    },
+    {
+      "name": "test_control_applied_progress_cannot_roll_back_to_send_apply_again",
+      "result": "passed"
+    },
+    {
+      "name": "test_ra06_decode_receipt_is_bound_to_the_bytes_it_certifies",
+      "result": "failed"
+    },
+    {
+      "name": "test_ra04_visual_adapter_requires_a_stored_review_not_a_retyped_mapping",
+      "result": "failed"
+    },
+    {
+      "name": "test_ra03_reused_cross_job_page_is_visible",
+      "result": "failed"
+    },
+    {
+      "name": "test_ra03_one_work_remains_one_work_after_resume",
+      "result": "failed"
+    }
+  ],
+  "author_fullI_recount": {
+    "total": 3424,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 5,
+    "passed": 3419,
+    "xml_sha256": "36b82711d87ae9e3e0bec791929168ace02c114408e88bd28e7bd89cc99c877f",
+    "skips": [
+      {
+        "name": "test_real_symlink_file_is_rejected_when_platform_supports_it",
+        "message": "real reparse point unavailable in isolated test directory: OSError"
+      },
+      {
+        "name": "test_real_symlink_ancestor_is_rejected_even_when_target_is_inside_root",
+        "message": "real reparse point unavailable in isolated test directory: OSError"
+      },
+      {
+        "name": "test_real_symlink_root_is_rejected",
+        "message": "real reparse point unavailable in isolated test directory: OSError"
+      },
+      {
+        "name": "test_pa03_missing_path_identity_cannot_be_reported_proven",
+        "message": "Local archive collector is outside the public repository; set PIXIVKEEP_ARCHIVE_COLLECTOR to its audited snapshot"
+      },
+      {
+        "name": "test_w_phase_local_boundaries_are_not_wired_into_reuse_yet",
+        "message": "W 阶段剩余边界（本轮只登记，不强行通过）：根不可用/重解析点/读取中变化已能进入 needs_verification（见 test_u1a_reuse_gate 与 artifact_health 契约），但仍缺：①根不可用/外置卷的 UI 与恢复动作，不把整库当成丢失；②链接/重解析点指向根外时的端到端拒绝断言；③同一批次同一 artifact 只观察一次的缓存；④跨会话不复用旧缓存；⑤快速核验不得升级为严格复用的端到端用例。"
+      }
+    ]
+  },
+  "findings": {
+    "P1": [
+      "RA-01"
+    ],
+    "P2": [
+      "RA-02",
+      "RA-03",
+      "RA-04",
+      "RA-05",
+      "RA-06"
+    ]
+  },
+  "inventory": {
+    "active": 66,
+    "archived": 73,
+    "dirty_preexisting": 7
+  },
+  "excluded_attempts": {
+    "probes01": "one fixture-construction failure (wrong Store helper), not final evidence",
+    "probes02": "ABA PNG was rejected by structure; baseline assertion failed, not final evidence",
+    "probes03": "8 red / 3 green; superseded by packaged05 with two additional RA-03 tests",
+    "facts04": "two additional RA-03 business assertions red"
+  }
+}
