@@ -680,13 +680,12 @@ def ensure_current(scope, snapshot, *, groups=None):
     audit's original counterexample was exactly the same member set under the same
     snapshot label belonging to another account.  So the refreshed members and the
     refreshed completeness are kept, the identity is not, and the returned scope
-    still says the account is unknown.  A caller that needs the account has to
-    build a fresh scope from the snapshot it trusts; continuing to use this one is
-    not a silent upgrade, because every consumer still sees "unknown" and the
-    report still refuses to call itself complete.  A caller that needs the account
-    has to call build_scope with the snapshot it trusts; this function will not do
-    that on its behalf.  No production caller exists yet (only the tests call this
-    function), which is why the rule could be tightened before the wiring step.
+    still says the account is unknown: every consumer keeps answering "unknown"
+    and no report can call itself complete on the strength of this refresh.  A
+    caller that needs the account must build a fresh scope from the snapshot it
+    trusts; this function will not do that on its behalf.  No production caller
+    exists yet (only the tests call this function), which is why the rule could be
+    tightened before the wiring step.
     """
     if not isinstance(scope, GroupScope):
         raise OrganizerError("scope_required")
