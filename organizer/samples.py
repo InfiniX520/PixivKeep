@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import asdict
 import os
 from pathlib import Path
+import re
 from urllib.parse import urlsplit
 import uuid
 
@@ -185,6 +186,32 @@ def supplement(store,web,data_root,sample_id,illust_id,page,downloader=download_
     return data
 
 
+_FINGERPRINT = re.compile(r'^[0-9a-f]{64}$')
+
+
+def _rules_identity(payload):
+    """Which rule set the review was taken against: (fingerprint, version).
+
+    A review without a rule fingerprint can only say "somebody looked at these
+    pictures"; it cannot say which rule set that judgement belongs to, and a
+    later consumer must not assume it was the current one (RA-04).  The caller may
+    pass the RuleSet itself or its fingerprint string; the version label is kept
+    only when it agrees with the rule set the fingerprint was taken from.
+    """
+    from organizer.rules import RuleSet, ruleset_fingerprint
+    declared = payload.get('rules_fingerprint')
+    label = payload.get('rules_version')
+    if isinstance(declared, RuleSet):
+        if label not in (None, '') and text(label, 100) != declared.version:
+            raise OrganizerError('rules_version_mismatch')
+        return ruleset_fingerprint(declared), declared.version
+    if declared is None or declared == '':
+        declared = ''
+    elif not isinstance(declared, str) or not _FINGERPRINT.match(declared):
+        raise OrganizerError('rules_fingerprint_invalid')
+    return declared, text(label, 100)
+
+
 def review(store, data_root, payload, *, attest_viewed):
     if not attest_viewed:
         raise OrganizerError('explicit_view_attestation_required')
@@ -209,10 +236,12 @@ def review(store, data_root, payload, *, attest_viewed):
     required=min(12,data['available_works'])
     if not needs_more and (len({data['images'][k]['illust_id'] for k in viewed})<required or required==0):
         raise OrganizerError('insufficient_visual_evidence')
+    rules_fingerprint,rules_version=_rules_identity(payload)
     value={'id':uuid.uuid4().hex,'created_at':now(),'account_id':data['account_id'],
            'artist_id':data['artist_id'],'snapshot_id':data['snapshot_id'],'sample_id':sample_id,'viewed':viewed,
            'observer':text(payload.get('observer'),100),'rationale':text(payload.get('rationale'),2000),
-           'rules_version':text(payload.get('rules_version'),100),'coverage_note':text(payload.get('coverage_note'),1000),
+           'rules_version':rules_version,'rules_fingerprint':rules_fingerprint,
+           'coverage_note':text(payload.get('coverage_note'),1000),
            'proposed_groups':groups(payload.get('proposed_groups')),'needs_more':needs_more,
            'evidence':[dict(data['images'][key]) for key in viewed],
            'attestation':'explicit_observer_statement_not_automatic_image_understanding'}
