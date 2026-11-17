@@ -313,6 +313,12 @@ def quality_evidence(path, *, decode_policy: str = "structure", limits=None, sto
     budget may be a CommandBudget shared with the caller (check_file does that
     so the version hashes it takes are charged to the same counters).  When it
     is None a fresh one is built from limits and stop.
+
+    The returned report names the bytes these dimensions describe in its
+    content object: the digest of the pass the decoder read through, or of the
+    structure walk when no decode ran.  check_file() reconciles it with the two
+    version hashes; on its own this report has no version to compare against, so
+    it reports which content it looked at and stops there.
     """
     if decode_policy not in DECODE_POLICIES:
         raise ValueError("decode_policy must be one of %s" % (DECODE_POLICIES,))
@@ -686,6 +692,12 @@ def check_file(path, *, decode_policy: str = "structure", limits=None, stop=None
     checked (the five dimensions) and whether the path still holds it
     (path_stability).  changed and unknown are not successes, whatever the five
     dimensions say.
+
+    A decode is only "ok" when its receipt is bound to the bytes this check
+    hashed (content.state == "observed", content.sha256 == sha256_before).  A
+    contradicting observation - a structure walk or a closing hash that saw
+    different bytes - demotes it to undecided with content_changed, which is the
+    one verdict an A->B->A swap cannot produce.
     """
     target = Path(path)
     outer = _limits(limits)
