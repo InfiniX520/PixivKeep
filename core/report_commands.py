@@ -244,6 +244,52 @@ def coverage_report_v2(
         )
     if facts.get("unmapped_delivery_states"):
         notes["unmapped_delivery_states"] = list(facts["unmapped_delivery_states"])
+    # RA-03: the denominators and the page links are relations, not counters that
+    # can be guessed from the batch rows.  A reader has to be able to tell "the
+    # snapshot says 40 artists and this task reached 12" from "nobody recorded how
+    # many there are", so both travel as words and as numbers.
+    snapshot = facts.get("snapshot") or {}
+    totals = (facts.get("run") or {}).get("totals") or {}
+    visited = totals.get("artists_visited")
+    members = snapshot.get("members")
+    if members is not None:
+        notes["artist_cohort"] = (
+            "画师总体: 快照成员 %d 位（活跃 %s），本任务到达 %s 位"
+            % (
+                int(members),
+                "未知" if snapshot.get("members_active") is None
+                else int(snapshot["members_active"]),
+                "未知" if visited is None else int(visited),
+            )
+        )
+        notes["snapshot_scope"] = str(snapshot.get("scope") or "")
+        notes["snapshot_members"] = int(members)
+        notes["snapshot_members_active"] = snapshot.get("members_active")
+        notes["artists_visited"] = visited
+    elif totals.get("artists_total") is None:
+        reason = str(totals.get("unknown_artists_reason") or "unknown")
+        notes["artist_cohort"] = (
+            "画师总体: 未知（%s）；本任务到达 %s 位"
+            % (reason, "未知" if visited is None else int(visited))
+        )
+        notes["artists_total_unknown"] = reason
+        notes["artists_visited"] = visited
+    links = (facts.get("pages") or {}).get("links") or {}
+    if links:
+        notes["page_links"] = {
+            "linked_pages": links.get("linked_pages"),
+            "artifact_only": links.get("artifact_only"),
+            "from_another_job": links.get("from_another_job"),
+            "unlinked_deliveries": links.get("unlinked_deliveries"),
+        }
+        if links.get("from_another_job"):
+            notes["cross_job_note"] = (
+                "%d 页来自其他任务的已存文件（artifact 链接）：计入已有页，"
+                "但不代表本任务重新保存过" % int(links["from_another_job"])
+            )
+    for name in ("works_multi_batch", "works_conflict", "works_superseded"):
+        if facts.get(name):
+            notes[name] = int(facts[name])
     return {
         "question": "follow_coverage",
         "provider": "v2",
