@@ -2505,6 +2505,44 @@
       "production_accepted": false,
       "worktree_inventory": {"total":141,"active":68,"archived":73,"dirty":16,"deleted":0,"moved":0},
       "open_gaps": ["RA-01 SQLite foreign sidecar deletion", "RA-02 read-only WAL creates SHM", "RA-03 V2 relation counts", "RA-04 canonical review binding", "RA-05 account scope identity", "RA-06 quality ABA binding"]
+    },
+    {
+      "session_date": "2026-11-17",
+      "summary": "Independent 7e657cb R3 follow-up: most RA fixes verified; two R4 correctness findings and verification-runner hardening required",
+      "round": "R3-followup-R4-audit",
+      "candidate": "7e657cbb8ae1092f5c8aa93f15f2ec0925ac0ec7",
+      "audit_branch": "audit/ra-r3-followup-20261117",
+      "daily_commit": "4ba891e34c312f049ef933eeb517da1e928b7575",
+      "report": "docs/audits/2026-11-17-ra-r3-followup/README.md",
+      "findings": "docs/audits/2026-11-17-ra-r3-followup/FINDINGS.md",
+      "development_guide": "docs/audits/2026-11-17-ra-r3-followup/DEVELOPMENT_GUIDE.md",
+      "maintenance": "docs/maintenance/2026-11-17_jpgpng_ra_r3_followup_audit.md",
+      "verification": {
+        "body": {"tests":3558,"passed":3553,"failed":0,"errors":0,"skipped":5},
+        "tk": {"tests":118,"passed":118,"failed":0,"errors":0,"skipped":0},
+        "presentation": {"tests":9,"passed":9,"failed":0,"errors":0,"skipped":0},
+        "existing_total":3685,
+        "existing_passed":3680,
+        "existing_skipped":5,
+        "frozen_ea": {"tests":15,"passed":15,"failed":0},
+        "adjacent_ra": {"tests":13,"passed":12,"failed":1,"expected_failure":"test_ra04_visual_receipt_cannot_be_reused_under_new_rule_version"},
+        "ra_modules_subset": {"tests":132,"passed":132,"failed":0},
+        "r4_probes": {"tests":4,"passed":2,"failed":2,"errors":0},
+        "compileall": "passed"
+      },
+      "product_source_changed": false,
+      "business_data_changed": false,
+      "deployed": false,
+      "pushed": false,
+      "merged_to_main": false,
+      "production_accepted": false,
+      "historical_reports_overwritten": false,
+      "open_gaps": [
+        "R4-01 private-copy retry omits a newly created WAL and committed rows while copy.verified is true",
+        "R4-02 ensure_current turns absent account provenance into a matched account",
+        "verification runner does not propagate unexpected pytest failures",
+        "inspect/verify direct read-only side effects, canonical review rule source, V2 expected content version and production acceptance remain separate work"
+      ]
     }
   ]
 }

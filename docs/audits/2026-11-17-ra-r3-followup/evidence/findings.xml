@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="2" skipped="0" tests="4" time="1.082" timestamp="2026-11-17T12:26:08.845740+08:00" hostname="DESKTOP-RD7D8L3"><testcase classname="jpgpng_ra_r3_audit_20261117_01.evidence.test_r4_findings" name="test_r4_01_copy_retry_must_not_drop_committed_wal_rows" time="0.027"><failure message="assert 2 in [1]">tmp_path = WindowsPath('E:/Zero9/JuiLiu/.runtime/jpgpng_ra_r3_audit_20261117_01/evidence/findings-tmp/test_r4_01_copy_retry_must_not0')
+monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x00000243ED81E660&gt;
+
+    def test_r4_01_copy_retry_must_not_drop_committed_wal_rows(tmp_path, monkeypatch):
+        database = tmp_path / "source.sqlite3"
+        with contextlib.closing(sqlite3.connect(database)) as connection:
+            with connection:
+                assert connection.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+                connection.execute("CREATE TABLE sample(v)")
+                connection.execute("INSERT INTO sample VALUES (1)")
+        original = facts._copy_hashed
+        writer = None
+        calls = []
+    
+        def inject_commit(source, destination, **kwargs):
+            nonlocal writer
+            result = original(source, destination, **kwargs)
+            calls.append(source.name)
+            if len(calls) == 1:
+                writer = sqlite3.connect(database)
+                writer.execute("INSERT INTO sample VALUES (2)")
+                writer.commit()
+            return result
+    
+        monkeypatch.setattr(facts, "_copy_hashed", inject_commit)
+        try:
+            connection = facts.read_only_connection(database, private_root=tmp_path)
+            try:
+                copied_rows = [row[0] for row in connection.execute("SELECT v FROM sample ORDER BY v")]
+                copy_fact = dict(connection.plan.copy or {})
+            finally:
+                connection.close()
+        finally:
+            if writer is not None:
+                writer.close()
+        print({"copy_calls": calls, "copied_rows": copied_rows, "copy_fact": copy_fact})
+&gt;       assert 2 in copied_rows
+E       assert 2 in [1]
+
+..\..\..\..\..\..\jpgpng_ra_r3_audit_20261117_01\evidence\test_r4_findings.py:60: AssertionError</failure></testcase><testcase classname="jpgpng_ra_r3_audit_20261117_01.evidence.test_r4_findings" name="test_r4_02_legacy_scope_cannot_acquire_account_from_another_snapshot" time="0.001"><failure message="AssertionError: assert 'account-B' == ''&#10;  &#10;  + account-B">def test_r4_02_legacy_scope_cannot_acquire_account_from_another_snapshot():
+        legacy = build_scope(snapshot(account=None, snapshot_id="legacy-without-account"), groups=["g"])
+        upgraded = ensure_current(legacy, snapshot(account="account-B", snapshot_id="later"))
+        batch = plan_batch(["1"], account_id="account-B", artists=1, requests=1, snapshot_id="")
+        decisions = [{"artist_id": "1", "kind": "unchanged", "action": "keep",
+                      "reason": "same", "needs_human": False,
+                      "evidence": {"before": ["g"], "after": ["g"]}}]
+        before = build_report(batch, decisions, legacy)
+        after = build_report(batch, decisions, upgraded)
+        print({"before": before["proof_limits"], "after": after["proof_limits"]})
+        assert before["proof_limits"]["account"] == "unknown"
+&gt;       assert upgraded.account_id == ""
+E       AssertionError: assert 'account-B' == ''
+E         
+E         + account-B
+
+..\..\..\..\..\..\jpgpng_ra_r3_audit_20261117_01\evidence\test_r4_findings.py:75: AssertionError</failure></testcase><testcase classname="jpgpng_ra_r3_audit_20261117_01.evidence.test_r4_findings" name="test_control_cross_job_pending_delivery_is_not_a_save" time="0.578" /><testcase classname="jpgpng_ra_r3_audit_20261117_01.evidence.test_r4_findings" name="test_control_same_content_generations_fold_under_the_r3_contract" time="0.266" /></testsuite></testsuites>

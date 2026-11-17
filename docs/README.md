@@ -1,6 +1,6 @@
 # JpgPng 文档导航
 
-**当前复审（2026-11-17，944ee13）**：原 EA-01..09 的 15 条反例通过，但相邻路径仍有 **RA-01 P1 + RA-02..06 P2**。先读[复审与整理接续](audits/2026-11-17-944-followup/README.md)、[逐项发现](audits/2026-11-15-u1u2-e1-r2-independent/FINDINGS.md)及[六包开发指导](audits/2026-11-15-u1u2-e1-r2-independent/DEVELOPMENT_GUIDE.md)。日常 `4ba891e` 未切换、未部署；生产验收全部未做，历史关闭报告保留原文。
+**当前复审（2026-11-17，7e657cb）**：R3 六包的大部分实现与原有回归成立，但独立反例确认 **R4-01 WAL 副本重试漏提交 + R4-02 scope 隐式补账号**。先读[本轮复审](audits/2026-11-17-ra-r3-followup/README.md)、[详细发现](audits/2026-11-17-ra-r3-followup/FINDINGS.md)及[R4 开发指导](audits/2026-11-17-ra-r3-followup/DEVELOPMENT_GUIDE.md)。旧 13 条仍是 12 绿 1 条具名过期前提失败；不能写成全绿。日常 `4ba891e` 未切换、未部署；生产验收全部未做，历史关闭报告保留原文。
 
 下载器 P0—P8、独立整理 CLI E1-2 已交付；E1 新增批次/规则/范围/冲突/报告离线引擎及三个命令；第二轮审计的九项已关闭，真实 E1-3 分类小样和 E1-4 批量写回仍未验收。2026-11-11 三项目审计另发现需修复的库完整性和依赖风险，详见下方审计报告；历史交付不代表已消除这些问题。日常使用从根目录的说明进入，这里集中索引计划、当前进度和历史材料。
 
@@ -20,8 +20,10 @@
 
 ## 当前进度与计划
 
-- [本轮复审与整理接续](audits/2026-11-17-944-followup/README.md)：当前优先入口。
-- [上一轮独立审计与六包开发指导](audits/2026-11-15-u1u2-e1-r2-independent/DEVELOPMENT_GUIDE.md)：下一轮实施契约。
+- [7e657cb 独立复审与 R4 接续](audits/2026-11-17-ra-r3-followup/README.md)：当前优先入口。
+- [R4 精确开发指导](audits/2026-11-17-ra-r3-followup/DEVELOPMENT_GUIDE.md)：下一轮实施契约与验收矩阵。
+- [944ee13 复审与整理接续](audits/2026-11-17-944-followup/README.md)：上一轮历史入口。
+- [上一轮独立审计与六包开发指导](audits/2026-11-15-u1u2-e1-r2-independent/DEVELOPMENT_GUIDE.md)：R3 的历史实施契约。
 - [上一轮审计原文](audits/2026-11-15-u1u2-independent/README.md)：保留 031627c 的历史红基线。
 
 - [U1/U2 审计修复的四个共同契约（2026-11-15）](optimization/2026-11-15/FIX_CONTRACTS.md)：所有权、质量观察、覆盖事实、依赖判断的字段与"未知怎么写"；上一轮的修复判据（其中 `budget.scope` 已被 R2 改为单文件调用，文件内保留原文并标注）。

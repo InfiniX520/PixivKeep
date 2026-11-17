@@ -1,0 +1,196 @@
+{
+  "schema_version": 1,
+  "batch": "JPGPNG-RA-R3-AUDIT-20261117-01",
+  "audited_commit": "7e657cbb8ae1092f5c8aa93f15f2ec0925ac0ec7",
+  "audit_base_commit": "7e657cbb8ae1092f5c8aa93f15f2ec0925ac0ec7",
+  "audit_branch": "audit/ra-r3-followup-20261117",
+  "previous_audit_commit": "5d1e676c539209fb517fe9e3b5025baac3c68582",
+  "daily": {
+    "branch": "daily/u1a-w5-w6-20261114",
+    "commit": "4ba891e34c312f049ef933eeb517da1e928b7575",
+    "clean": true,
+    "deployed": false
+  },
+  "python": "D:\\Miniconda3\\envs\\JuiLiu\\python.exe",
+  "environment": {
+    "PYTHONNOUSERSITE": "1",
+    "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"
+  },
+  "common_test_arguments": "-s -B -X utf8 -m pytest -p no:cacheprovider -q; fresh --basetemp; --junitxml",
+  "evidence": {
+    "adjacent": {
+      "name": "adjacent",
+      "tests": 13,
+      "failed": 1,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 12,
+      "xml": "adjacent.xml",
+      "sha256": "c73468fd845f7d8003ccc0e3ba7a190a0e3f4ec444f1a3c5fe87c7dc1499fd34",
+      "bytes": 3090,
+      "command": "D:\\Miniconda3\\envs\\JuiLiu\\python.exe -s -B -X utf8 -m pytest -p no:cacheprovider -q --basetemp <fresh> --junitxml <xml> E:\\Zero9\\JuiLiu\\.runtime\\jpgpng_ra_fix_20261117_01\\verify\\test_adjacent.py",
+      "process_exit_code": 1,
+      "expected_failures": [
+        "test_ra04_visual_receipt_cannot_be_reused_under_new_rule_version"
+      ]
+    },
+    "body": {
+      "name": "body",
+      "tests": 3558,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 5,
+      "passed": 3553,
+      "xml": "body.xml",
+      "sha256": "6a9c0feedfc9a70730e00d069d8c22acb9ba416fcb6f81e51c7bb414a55e4081",
+      "bytes": 499477,
+      "command": "D:\\Miniconda3\\envs\\JuiLiu\\python.exe -s -B -X utf8 -m pytest -p no:cacheprovider -q --basetemp <fresh> --junitxml <xml> tests --ignore=tests/test_collection_presentation.py --ignore=tests/test_collection_verification_panel.py --ignore=tests/test_collection_view.py --ignore=tests/test_coverage_page.py --ignore=tests/test_scaled_window.py --ignore=tests/test_source_presentation.py",
+      "process_exit_code": 0
+    },
+    "tk": {
+      "name": "tk",
+      "tests": 118,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 118,
+      "xml": "tk.xml",
+      "sha256": "2a3c8b331ac417f15ef59c42800c09fa781ccad33d8fd19c53ac27cfa0751622",
+      "bytes": 16748,
+      "command": "D:\\Miniconda3\\envs\\JuiLiu\\python.exe -s -B -X utf8 -m pytest -p no:cacheprovider -q --basetemp <fresh> --junitxml <xml> tests/test_collection_verification_panel.py tests/test_collection_view.py tests/test_coverage_page.py tests/test_scaled_window.py",
+      "process_exit_code": 0
+    },
+    "pres": {
+      "name": "pres",
+      "tests": 9,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 9,
+      "xml": "pres.xml",
+      "sha256": "24c21211b13b19d28d5308397910fb360b806e3e5c15316e66fbcb918ca1a3c5",
+      "bytes": 1540,
+      "command": "D:\\Miniconda3\\envs\\JuiLiu\\python.exe -s -B -X utf8 -m pytest -p no:cacheprovider -q --basetemp <fresh> --junitxml <xml> tests/test_collection_presentation.py tests/test_source_presentation.py",
+      "process_exit_code": 0
+    },
+    "frozen": {
+      "name": "frozen",
+      "tests": 15,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 15,
+      "xml": "frozen.xml",
+      "sha256": "4fc55703cdda2ef9c6655e3a757393e8f11dedbc20917ef5511f38d89f6dc249",
+      "bytes": 2877,
+      "command": "D:\\Miniconda3\\envs\\JuiLiu\\python.exe -s -B -X utf8 -m pytest -p no:cacheprovider -q --basetemp <fresh> --junitxml <xml> docs/audits/2026-11-15-u1u2-e1-independent/evidence/test_boundaries.py",
+      "process_exit_code": 0
+    },
+    "targeted": {
+      "name": "targeted",
+      "tests": 132,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 132,
+      "xml": "targeted.xml",
+      "sha256": "12c36011149001a10901b028dbb38a8771324f814987395b75b524b29dfad9c5",
+      "bytes": 17925,
+      "command": "D:\\Miniconda3\\envs\\JuiLiu\\python.exe -s -B -X utf8 -m pytest -p no:cacheprovider -q --basetemp <fresh> --junitxml <xml> tests/test_ra01_family_authorization.py tests/test_ra01_source_bookkeeping.py tests/test_ra02_read_plan.py tests/test_ra02_legacy_read.py tests/test_ra03_relations.py tests/test_ra03_report_notes.py tests/test_ra04_canonical_review.py tests/test_ra05_scope_account.py tests/test_ra06_content_binding.py tests/test_ra06_cli_binding.py tests/test_ra06_budget_ceiling.py",
+      "process_exit_code": 0
+    },
+    "findings": {
+      "name": "findings",
+      "tests": 4,
+      "failed": 2,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 2,
+      "xml": "findings.xml",
+      "sha256": "be51c303a297f00a2dd9ef1cabbbc58345b6e0cbf05148fc2c5d694b97049639",
+      "bytes": 4061,
+      "command": "D:\\Miniconda3\\envs\\JuiLiu\\python.exe -s -B -X utf8 -m pytest -p no:cacheprovider -q --basetemp <fresh> --junitxml <xml> docs/audits/2026-11-17-ra-r3-followup/evidence/test_r4_findings.py",
+      "process_exit_code": 1,
+      "expected_failures": [
+        "test_r4_01_copy_retry_must_not_drop_committed_wal_rows",
+        "test_r4_02_legacy_scope_cannot_acquire_account_from_another_snapshot"
+      ]
+    }
+  },
+  "existing_suite": {
+    "tests": 3685,
+    "passed": 3680,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 5
+  },
+  "counts_note": "Body+Tk+presentation only. Targeted is a subset of body. Frozen, adjacent and new findings are separate and never summed into an all-green claim.",
+  "findings": [
+    {
+      "id": "R4-01",
+      "severity": "P2",
+      "status": "reproduced",
+      "test": "test_r4_01_copy_retry_must_not_drop_committed_wal_rows"
+    },
+    {
+      "id": "R4-02",
+      "severity": "P2",
+      "status": "reproduced",
+      "test": "test_r4_02_legacy_scope_cannot_acquire_account_from_another_snapshot"
+    },
+    {
+      "id": "R4-03",
+      "severity": "verification",
+      "status": "source_confirmed",
+      "test": "run_round.py returns zero despite child failure"
+    },
+    {
+      "id": "R4-04",
+      "severity": "P3",
+      "status": "wording_overclaim",
+      "test": "sidecar appearance is not exclusive creation ownership"
+    }
+  ],
+  "new_probe_source": {
+    "path": "test_r4_findings.py",
+    "sha256": "d8eae7ecad04c02df438535dbf575b2379715b80dceee4a1edd3e5b3882853e8",
+    "bytes": 5538
+  },
+  "compileall": {
+    "targets": [
+      "core",
+      "gui",
+      "organizer",
+      "utils",
+      "maintain.py"
+    ],
+    "exit_code": 0
+  },
+  "gitnexus": {
+    "nodes": 14450,
+    "edges": 37125,
+    "flows": 300,
+    "changed_files": 41,
+    "changed_symbols": 487,
+    "affected_processes": 17,
+    "risk": "CRITICAL impact scope; not a defect count"
+  },
+  "preservation": {
+    "product_source_changed": false,
+    "historical_reports_overwritten": false,
+    "network": false,
+    "installed": false,
+    "pushed": false,
+    "deployed": false,
+    "merged_to_main": false,
+    "production_accepted": false,
+    "business_data_accessed": false
+  },
+  "workspace_evidence": "E:\\Zero9\\JuiLiu\\.runtime\\jpgpng_ra_r3_audit_20261117_01\\evidence",
+  "worktree": "E:\\Zero9\\JuiLiu\\.runtime\\jpgpng_ra_fix_20261117_01\\integration_worktree\\.agents\\worktrees\\audit\\ra-r3-followup-20261117",
+  "notes": [
+    "Final2 XML timestamps support inclusion of 2aa18c3; the dfe2554 line in RESULTS_R3.md is a stale heading.",
+    "The old RA-04 #1 remains an explicitly named failed historical premise; it is not counted as passed.",
+    "Early exploratory probe errors are preserved under workspace exploration/ but excluded from conclusions."
+  ]
+}
